@@ -15,10 +15,13 @@ extern volatile uint8_t g_system_state_changed_flag;
  *       状态机当前对外输出的状态快照。
  *   s_initialized
  *       标记状态机是否已经完成过首次初始化，避免未初始化时直接进入完整判断流程。
- *   s_normal_fall_confirm_count
- *       LOW_TEMP 回落到 NORMAL 的连续确认计数器。
+ * 四个状态按温度组成一条链：LOW_TEMP - NORMAL - HIGH_TEMP - DANGER。
+ * NORMAL 处于链中间，向任一侧偏离都会离开 NORMAL；回落时只能朝 NORMAL 方向逐级移动。
+ *
  *   s_low_temp_fall_confirm_count
- *       HIGH_TEMP 回落到 LOW_TEMP 的连续确认计数器。
+ *       LOW_TEMP 回落到 NORMAL 的连续确认计数器。
+ *   s_high_temp_fall_confirm_count
+ *       HIGH_TEMP 回落到 NORMAL 的连续确认计数器。
  *   s_danger_fall_confirm_count
  *       DANGER 回落到 HIGH_TEMP 的连续确认计数器。
  */
@@ -27,8 +30,8 @@ static system_state_input_t s_last_input;
 static uint8_t s_last_input_valid = 0U;
 static uint8_t s_initialized = 0U;
 
-static uint8_t s_normal_fall_confirm_count = 0U;
 static uint8_t s_low_temp_fall_confirm_count = 0U;
+static uint8_t s_high_temp_fall_confirm_count = 0U;
 static uint8_t s_danger_fall_confirm_count = 0U;
 
 
@@ -135,13 +138,13 @@ static void system_state_enter(system_state_t next, uint32_t now_ms)
 
 /*
  * system_state_clear_fall_counters
- *   清空所有降级确认计数器。
- *   当状态发生切换或检测到更高风险时，原有的回落确认信息就不再可信，必须重新累计。
+ *   清空所有回落确认计数器。
+ *   当状态发生切换或检测到偏离 NORMAL 的条件时，原有的回落确认信息就不再可信，必须重新累计。
  */
 static void system_state_clear_fall_counters(void)
 {
-    s_normal_fall_confirm_count = 0U;
     s_low_temp_fall_confirm_count = 0U;
+    s_high_temp_fall_confirm_count = 0U;
     s_danger_fall_confirm_count = 0U;
 }
 
@@ -153,7 +156,7 @@ static void system_state_clear_fall_counters(void)
  * system_state_has_low_temp
  *   判断当前输入是否满足“低温”条件。
  *   触发来源：
- *     1) 最高温度进入低温区间，但尚未达到高温预警阈值；
+ *     1) 最高温度低于低温阈值（< 15.0°C）。
  */
 static uint8_t system_state_has_low_temp(const system_state_input_t *input)
 {
@@ -161,15 +164,14 @@ static uint8_t system_state_has_low_temp(const system_state_input_t *input)
         return 0U;
     }
 
-    return (uint8_t)((input->max_temperature_tenths >= (int16_t)SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C) &&
-                     (input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C));
+    return (uint8_t)(input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C);
 }
 
 /*
  * system_state_has_high_temp
  *   判断当前输入是否满足“高温预警”条件。
  *   触发来源包括：
- *     1) 最高温度进入高温预警区间，但尚未达到危险阈值；
+ *     1) 最高温度达到高温预警阈值，但尚未达到危险阈值（[27.0°C, 33.0°C)）；
  *     2) 压力异常，需要通过泄压等手段尝试恢复。
  */
 static uint8_t system_state_has_high_temp(const system_state_input_t *input)
@@ -191,7 +193,7 @@ static uint8_t system_state_has_high_temp(const system_state_input_t *input)
  *   判断当前输入是否已达到危险区间。
  *   触发来源包括：
  *     1) 气体泄露告警；
- *     2) 最高温度进入危险区间。
+ *     2) 最高温度达到危险阈值（>= 33.0°C）。
  *
  *   一旦满足任一条件，应立即进入 DANGER。
  */
@@ -240,52 +242,54 @@ static uint8_t system_state_handle_fall_confirm(uint8_t condition_met,
 }
 
 /*
- * system_state_can_fall_to_normal
- *   判断是否满足从 LOW_TEMP 回落到 NORMAL 的条件。
+ * system_state_can_fall_from_low_temp
+ *   判断是否满足从 LOW_TEMP 回落到 NORMAL 的条件（温度回升到不再低温）。
  *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
  */
-static uint8_t system_state_can_fall_to_normal(const system_state_input_t *input)
+static uint8_t system_state_can_fall_from_low_temp(const system_state_input_t *input)
 {
     if(input == NULL) {
         return 0U;
     }
 
     return system_state_handle_fall_confirm(
-        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
-        &s_normal_fall_confirm_count,
-        0U);
-}
-
-/*
- * system_state_can_fall_to_low_temp_from_high_temp
- *   判断是否满足从 HIGH_TEMP 回落到 LOW_TEMP 的条件。
- *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
- */
-static uint8_t system_state_can_fall_to_low_temp_from_high_temp(const system_state_input_t *input)
-{
-    if(input == NULL) {
-        return 0U;
-    }
-
-    return system_state_handle_fall_confirm(
-        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
+        (uint8_t)(input->max_temperature_tenths >= (int16_t)SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C),
         &s_low_temp_fall_confirm_count,
         0U);
 }
 
 /*
- * system_state_can_fall_to_high_temp_from_danger
- *   判断是否满足从 DANGER 回落到 HIGH_TEMP 的条件。
+ * system_state_can_fall_from_high_temp
+ *   判断是否满足从 HIGH_TEMP 回落到 NORMAL 的条件（温度降回安全区间，且压力无异常）。
  *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
  */
-static uint8_t system_state_can_fall_to_high_temp_from_danger(const system_state_input_t *input)
+static uint8_t system_state_can_fall_from_high_temp(const system_state_input_t *input)
 {
     if(input == NULL) {
         return 0U;
     }
 
     return system_state_handle_fall_confirm(
-        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_DANGER_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
+        (uint8_t)((input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C) &&
+                  (input->pressure_alarm == 0U)),
+        &s_high_temp_fall_confirm_count,
+        0U);
+}
+
+/*
+ * system_state_can_fall_from_danger
+ *   判断是否满足从 DANGER 回落到 HIGH_TEMP 的条件（温度降回危险阈值以下，且无气体告警）。
+ *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
+ */
+static uint8_t system_state_can_fall_from_danger(const system_state_input_t *input)
+{
+    if(input == NULL) {
+        return 0U;
+    }
+
+    return system_state_handle_fall_confirm(
+        (uint8_t)((input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_DANGER_TEMP_C) &&
+                  (input->gas_alarm == 0U)),
         &s_danger_fall_confirm_count,
         0U);
 }
@@ -361,10 +365,11 @@ void system_state_task(const system_state_input_t *input)
     }
 
     /*
-     * 预先计算各风险等级条件：
-     *   - 气体泄露直接进入危险状态，判定由 system_state_has_danger() 统一负责；
-     *   - 压力异常归入高温预警，判定由 system_state_has_high_temp() 统一负责；
-     *   - 温度按门槛分级进入低温/高温预警/危险。
+     * 预先计算各风险等级条件（四者互斥，同一时刻最多一个为真）：
+     *   - has_danger    : 气体泄露，或最高温度 >= 33.0°C；
+     *   - has_high_temp : 压力异常，或最高温度处于 [27.0°C, 33.0°C)；
+     *   - has_low_temp  : 最高温度 < 15.0°C；
+     *   - 均不满足时，代表温度处于 [15.0°C, 27.0°C) 安全区间（NORMAL）。
      */
     has_danger = system_state_has_danger(input);
     has_high_temp = (uint8_t)(!has_danger && system_state_has_high_temp(input));
@@ -409,12 +414,16 @@ void system_state_task(const system_state_input_t *input)
         }
         s_status.buzzer_enable = 0U;
         if(has_danger != 0U) {
+            /* 温度骤升或气体告警：跨级快速切换到 DANGER，不额外延迟 */
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
         } else if(has_high_temp != 0U) {
+            /* 压力异常或温度骤升：跨级快速切换到 HIGH_TEMP，不额外延迟 */
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_HIGH_TEMP, now_ms);
-        } else if(system_state_can_fall_to_normal(input) != 0U) {
+        } else if(has_low_temp != 0U) {
+            s_low_temp_fall_confirm_count = 0U;
+        } else if(system_state_can_fall_from_low_temp(input) != 0U) {
             system_state_enter(SYSTEM_STATE_NORMAL, now_ms);
             system_state_clear_fall_counters();
         }
@@ -435,10 +444,14 @@ void system_state_task(const system_state_input_t *input)
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
-        } else if(has_high_temp != 0U) {
-            s_low_temp_fall_confirm_count = 0U;
-        } else if(system_state_can_fall_to_low_temp_from_high_temp(input) != 0U) {
+        } else if(has_low_temp != 0U) {
+            /* 温度骤降：跨级快速切换到 LOW_TEMP，不额外延迟 */
+            system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_LOW_TEMP, now_ms);
+        } else if(has_high_temp != 0U) {
+            s_high_temp_fall_confirm_count = 0U;
+        } else if(system_state_can_fall_from_high_temp(input) != 0U) {
+            system_state_enter(SYSTEM_STATE_NORMAL, now_ms);
             system_state_clear_fall_counters();
         }
         break;
@@ -458,7 +471,8 @@ void system_state_task(const system_state_input_t *input)
         s_status.buzzer_enable = 1U;
         if(has_danger != 0U) {
             s_danger_fall_confirm_count = 0U;
-        } else if(system_state_can_fall_to_high_temp_from_danger(input) != 0U) {
+        } else if(system_state_can_fall_from_danger(input) != 0U) {
+            /* 回落只能逐级进行：DANGER 只能先降到 HIGH_TEMP，不允许跳过 */
             system_state_enter(SYSTEM_STATE_HIGH_TEMP, now_ms);
             system_state_clear_fall_counters();
         }
