@@ -128,6 +128,7 @@ extern volatile uint8_t g_key4_event;                  /* key.c */
 
 /* ---- module-local state ----------------------------------------------- */
 static uint8_t s_ignition_on = 0U;
+static uint8_t s_ignition_locked = 0U;   /* 1 = DANGER 状态强制锁定，禁止点火 */
 static TaskHandle_t s_app_task_handle = NULL;
 /* note: not static, ISRs in gd32a7xx_it.c need to read this to know
  * whether an external event (CAN RX) should also wake guard_task.
@@ -365,6 +366,13 @@ static void apply_state_to_actuators(void)
 
     actor_set_channel(GPIO_CH_BUZZER, status.buzzer_enable);
     actor_set_channel(GPIO_CH_GATE,   status.gate_enable);
+
+    /* DANGER 状态下强制切断点火（PF0 拉低），并锁定 ignition_task
+     * 使其忽略此时的 KEY_3 切换请求；其余状态解锁，恢复按键正常控制。 */
+    s_ignition_locked = (status.ignition_allowed == 0U) ? 1U : 0U;
+    if(s_ignition_locked != 0U) {
+        ignition_set(0U);
+    }
 
     /* 系统状态LED指示灯控制（互斥点亮） */
     actor_set_channel(GPIO_CH_LED_WHITE,  (status.state == SYSTEM_STATE_LOW_TEMP) ? 1U : 0U);
@@ -619,7 +627,11 @@ static void ignition_task(void *pvParameters)
 
     for( ;; ) {
         if(xSemaphoreTake(ignition_sem, portMAX_DELAY) == pdTRUE) {
-            ignition_set((uint8_t)!ignition_get());
+            /* DANGER 状态下 s_ignition_locked 为 1，忽略此次按键请求，
+             * 保证点火始终保持在强制关闭状态。 */
+            if(s_ignition_locked == 0U) {
+                ignition_set((uint8_t)!ignition_get());
+            }
         }
     }
 }

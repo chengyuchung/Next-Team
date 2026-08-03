@@ -104,6 +104,10 @@ typedef enum {
  *       统一加热模式下4路同时响应；分区模式下可独立控制；
  *   buzzer_enable
  *       蜂鸣器使能，用于告警提示；
+ *   ignition_allowed
+ *       点火许可标志。除 DANGER 外均为 1（允许按键正常控制点火）；
+ *       DANGER 状态下强制为 0，外部模块必须据此将点火输出强制拉低，
+ *       并且忽略此时的点火切换请求；
  *   next_temperature_sample_interval_ms
  *       下次建议的温度采样周期。状态越危险，采样周期越短。
  */
@@ -118,6 +122,7 @@ typedef struct {
     uint8_t cooler_enable[4];     /* 制冷片1-4独立使能 */
     uint8_t heater_enable[4];     /* PTC加热片1-4独立使能 */
     uint8_t buzzer_enable;
+    uint8_t ignition_allowed;     /* 点火许可，DANGER 状态下强制为0 */
     uint32_t next_temperature_sample_interval_ms;
 } system_state_status_t;
 

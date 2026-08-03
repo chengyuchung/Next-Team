@@ -96,6 +96,7 @@ static void system_state_sync_common_outputs(uint32_t now_ms)
         s_status.heater_enable[i] = 0U;
     }
     s_status.buzzer_enable = 0U;
+    s_status.ignition_allowed = 1U;
     g_system_state_changed_flag = 0U;
 }
 
@@ -304,6 +305,7 @@ void system_state_init(void)
     memset(&s_status, 0, sizeof(s_status));
     memset(&s_last_input, 0, sizeof(s_last_input));
     s_status.state = SYSTEM_STATE_NORMAL;
+    s_status.ignition_allowed = 1U;
     s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_NORMAL_SAMPLE_MS;
     s_last_input_valid = 0U;
     s_initialized = 1U;
@@ -328,6 +330,7 @@ void system_state_reset(void)
 
     /* 初始化关键状态字段 */
     s_status.state = SYSTEM_STATE_NORMAL;
+    s_status.ignition_allowed = 1U;
     s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_NORMAL_SAMPLE_MS;
 
     /* 标记系统已完成初始化 */
@@ -390,6 +393,7 @@ void system_state_task(const system_state_input_t *input)
             s_status.cooler_enable[i] = 0U;
         }
         s_status.buzzer_enable = 0U;            /* 蜂鸣器关闭 */
+        s_status.ignition_allowed = 1U;          /* 允许点火 */
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
@@ -415,6 +419,7 @@ void system_state_task(const system_state_input_t *input)
             s_status.cooler_enable[i] = 0U;
         }
         s_status.buzzer_enable = 0U;            /* 蜂鸣器关闭 */
+        s_status.ignition_allowed = 1U;          /* 允许点火 */
         if(has_danger != 0U) {
             /* 温度骤升或气体告警：跨级快速切换到 DANGER，不额外延迟 */
             system_state_clear_fall_counters();
@@ -444,6 +449,7 @@ void system_state_task(const system_state_input_t *input)
             s_status.cooler_enable[i] = 0U;
         }
         s_status.buzzer_enable = 0U;            /* 蜂鸣器关闭 */
+        s_status.ignition_allowed = 1U;          /* 允许点火 */
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
@@ -473,6 +479,7 @@ void system_state_task(const system_state_input_t *input)
             s_status.cooler_enable[i] = 1U;
         }
         s_status.buzzer_enable = 1U;            /* 开启蜂鸣器报警 */
+        s_status.ignition_allowed = 0U;          /* 强制禁止点火，切断PF0 */
         if(has_danger != 0U) {
             s_danger_fall_confirm_count = 0U;
         } else if(system_state_can_fall_from_danger(input) != 0U) {
