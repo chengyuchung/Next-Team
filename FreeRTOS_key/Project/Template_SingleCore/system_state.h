@@ -1,0 +1,190 @@
+#ifndef SYSTEM_STATE_H
+#define SYSTEM_STATE_H
+
+#include <stdint.h>
+#include "app_config.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * =============================================================================
+ * 模块名称 : system_state
+ * 文件功能 : 车辆热管理系统状态机
+ *
+ * 模块定位
+ *   本模块负责对外部输入进行统一裁决，输出当前系统应处于的状态，
+ *   并给出与状态相关的基础控制结果。它不负责单独的故障诊断、
+ *   告警生成、执行器细节控制或通信协议细节，这些工作应由对应模块完成。
+ *
+ * 设计目标
+ *   1) 用一个清晰、稳定的状态机描述系统处于什么风险等级；
+ *   2) 只围绕“最高温度”做核心温度判断，因为它最能代表最危险的局部热点；
+ *   3) 通过清晰的滞回和连续确认机制，避免状态在阈值附近频繁抖动；
+ *   4) 所有阈值采用宏定义，便于调试阶段直接修改并重新编译验证。
+ *
+ * 状态定义
+ *   - NORMAL      : 正常运行状态，系统未进入明显风险区；
+ *   - PRE_WARNING : 轻度风险状态，表示温度开始接近风险边界或存在轻微外部告警；
+ *   - WARNING     : 中度风险状态，表示风险已经明显上升，需要持续关注；
+ *   - DANGER      : 高风险状态，表示已经达到最危险区间，需要优先保证安全。
+ *
+ * 状态迁移原则
+ *   1) 升级可以快速发生，不额外延迟；
+ *   2) 回落必须逐级进行，不能越级回退；
+ *   3) 回落时引入温度滞回与连续确认，避免噪声导致状态来回跳变；
+ *   4) 上电后状态机始终运行，初始化只是启动过程，不作为业务状态。
+ * =============================================================================
+ */
+
+/*
+ * 默认阈值与采样周期说明
+ *   - 温度阈值单位为 0.1°C；
+ *   - 采样周期单位为毫秒（ms）；
+ *   - 这些宏定义是当前版本的主要调试入口，状态机逻辑直接使用它们。
+ *
+ * 阈值含义
+ *   - PRE_WARNING_TEMP_C
+ *       进入预警的温度门槛；
+ *   - WARNING_TEMP_C
+ *       进入危险的温度门槛；
+ *   - DANGER_TEMP_C
+ *       进入最高危险的温度门槛；
+ *   - *_CLEAR_TEMP_C
+ *       各等级回落时使用的清除阈值，用于配合滞回和连续确认抑制抖动；
+ *   - *_SAMPLE_MS
+ *       不同状态下建议的温度采样周期，状态越危险，采样越频繁。
+ */
+#define SYSTEM_STATE_DEFAULT_PRE_WARNING_TEMP_C        270U /* 进入预警的温度阈值。 */
+#define SYSTEM_STATE_DEFAULT_WARNING_TEMP_C            300U /* 进入危险的温度阈值。 */
+#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             330U /* 进入最高危险的温度阈值。 */
+//#define SYSTEM_STATE_DEFAULT_PRE_WARNING_CLEAR_TEMP_C  380U /* 预警回落到正常时的清除阈值。 */
+//#define SYSTEM_STATE_DEFAULT_WARNING_CLEAR_TEMP_C      550U /* 危险回落到预警时的清除阈值。 */
+//#define SYSTEM_STATE_DEFAULT_DANGER_CLEAR_TEMP_C       750U /* 最高危险回落到危险时的清除阈值。 */
+#define SYSTEM_STATE_DEFAULT_NORMAL_SAMPLE_MS          2000U /* 正常状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_PRE_WARNING_SAMPLE_MS     1000U /* 预警状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_WARNING_SAMPLE_MS          500U  /* 危险状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_DANGER_SAMPLE_MS           250U  /* 最高危险状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C          0U    /* 回落滞回宽度，避免阈值附近抖动。 */
+#define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      2U    /* 回落确认次数，需连续满足条件才允许降级。 */
+
+/*
+ * system_state_t
+ *   状态机当前状态枚举。
+ *   该枚举用于描述系统当前所处的风险等级，以及状态机迁移方向。
+ */
+typedef enum {
+    SYSTEM_STATE_NORMAL = 0,
+    SYSTEM_STATE_PRE_WARNING,
+    SYSTEM_STATE_WARNING,
+    SYSTEM_STATE_DANGER
+} system_state_t;
+
+/*
+ * system_state_status_t
+ *   状态机输出结构体。
+ *
+ * 说明
+ *   这是状态机最终对外提供的结果快照。外部模块应直接读取这个结构体，
+ *   而不要自行重新推导状态机内部判断逻辑。
+ *
+ * 字段说明
+ *   state
+ *       当前状态机状态，用于表示系统正处于哪个风险等级；
+ *   state_changed
+ *       本次调用中是否发生了状态切换。若发生状态跳变，则为 1，否则为 0；
+ *   fan_enable
+ *       风扇使能标志。由状态机给出基础裁决，具体执行方式由执行器模块完成；
+ *   pump_enable
+ *       水泵使能标志。由状态机给出基础裁决，具体执行方式由执行器模块完成；
+ *   gate_enable
+ *       泄压阀使能标志。用于执行泄压动作，具体执行方式由执行器模块完成；
+ *   cooling_enable
+ *       制冷片使能标志。由状态机给出基础裁决，具体执行方式由执行器模块完成；
+ *   heating_enable
+ *       加热允许标志。当前版本预留，便于后续扩展热管理策略；
+ *   buzzer_enable
+ *       蜂鸣器使能，用于告警提示；
+ *   next_temperature_sample_interval_ms
+ *       下次建议的温度采样周期。状态越危险，采样周期越短。
+ */
+typedef struct {
+    system_state_t state;
+    uint8_t state_changed;
+    uint8_t fan_enable;
+    uint8_t fan_duty_percent;
+    uint8_t pump_enable;
+    uint8_t pump_duty_percent;
+    uint8_t gate_enable;
+    uint8_t cooling_enable;
+    uint8_t heating_enable;
+    uint8_t buzzer_enable;
+    uint32_t next_temperature_sample_interval_ms;
+} system_state_status_t;
+
+/*
+ * system_state_input_t
+ *   状态机输入结构体。
+ *
+ * 说明
+ *   调用方在调用 system_state_task() 前，应将当前时刻与状态判断相关的输入
+ *   整理到该结构体中，再一次性传入状态机。
+ *
+ * 字段说明
+ *   gas_alarm / pressure_alarm
+ *       外部报警输入。通常由专门的检测模块给出，状态机只负责根据它们
+ *       决定是否进入更高风险等级；
+ *   pressure_valid
+ *       压力数据整体是否有效。若为无效，则状态机不执行压力相关判断；
+ *   max_temperature_tenths
+ *       当前时刻温度统计中的最高温度，单位为 0.1°C。状态机只采用该值进行温度风险判断，
+ *       因为它最能反映最危险的局部热点；
+ *   temp_sensor_valid_count
+ *       有效温度点数量。当前版本未直接参与决策，但保留用于后续一致性判断；
+ *   temperature_valid
+ *       温度数据整体是否有效。若为无效，则状态机不执行温度风险判断，只维持基础状态；
+ *   now_ms
+ *       当前系统时间戳，单位为毫秒。用于状态切换时的时间基准和采样周期管理；
+ *   ignition_on
+ *       点火/系统运行许可。它不会决定状态机是否运行，但可作为后续保护逻辑的输入。
+ */
+typedef struct {
+    uint8_t gas_valid;
+    uint8_t gas_alarm;
+    uint8_t pressure_alarm;
+    int32_t pressure_pa;
+    uint8_t pressure_valid;
+    int16_t max_temperature_tenths;
+    uint8_t temp_sensor_valid_count;
+    uint8_t temp_sensor_fault_mask;
+    uint8_t temperature_valid;
+    uint32_t now_ms;
+    uint8_t ignition_on;
+} system_state_input_t;
+
+/*
+ * 对外接口说明
+ *   system_state_init()
+ *       完成状态机的初始化；
+ *   system_state_reset()
+ *       将状态机恢复到初始状态；
+ *   system_state_task()
+ *       输入一次状态快照并更新状态机；
+ *   system_state_get_status()
+ *       读取状态机输出快照；
+ *   system_state_get_state()
+ *       读取当前状态；
+ */
+void system_state_init(void);
+void system_state_reset(void);
+void system_state_task(const system_state_input_t *input);
+void system_state_get_status(system_state_status_t *status);
+void system_state_get_input(system_state_input_t *input);
+system_state_t system_state_get_state(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SYSTEM_STATE_H */

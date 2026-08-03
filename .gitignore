@@ -1,0 +1,41 @@
+# ==========================================
+# Keil MDK / C51 编译产生的临时与中间文件
+# ==========================================
+*.o
+*.d
+*.crf
+*.elf
+*.axf
+*.htm
+*.lnp
+*.sct
+*.map
+*.lst
+*.dep
+*.build_log.htm
+*.I
+*.i
+
+# Keil 界面设置/历史状态文件（每个人电脑上可能不同，不需要提交）
+*.uvgui.*
+*.uvguix.*
+*.bak
+*.dep
+
+# J-Link / ST-Link 等调试器产生的历史记录/配置文件
+JLinkLog.txt
+JLinkSettings.ini
+*.JLinkScript
+
+# CPU 诊断与各种输出文件夹（如果在工程设置中重定向了输出路径）
+Objects/
+Listings/
+Out/
+
+# ==========================================
+# 系统与编辑器杂项
+# ==========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

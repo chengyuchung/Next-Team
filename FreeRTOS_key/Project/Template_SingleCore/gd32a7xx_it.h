@@ -1,0 +1,79 @@
+/*!
+    \file    gd32a7xx_it.h
+    \brief   the header file of the ISR
+
+    \version 2025-08-06, V0.1.0, firmware for GD32A7xx
+    \note    Merged: FreeRTOS template (Template_SingleCore) + Thermal_Management project
+             - SVC_Handler / PendSV_Handler / SysTick_Handler are NOT declared here.
+               FreeRTOS port.c owns them via FreeRTOSConfig.h macro aliases.
+*/
+
+/*
+    Copyright (c) 2025, GigaDevice Semiconductor Inc.
+
+    Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+    3. Neither the name of the copyright holder nor the names of its contributors
+       may be used to endorse or promote products derived from this software without
+       specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+OF SUCH DAMAGE.
+*/
+
+#ifndef GD32A7XX_IT_H
+#define GD32A7XX_IT_H
+
+#include "gd32a7xx.h"
+
+/* ============================================================
+ *  Cortex-M Fault Handlers
+ * ============================================================ */
+/* this function handles NMI exception */
+void NMI_Handler(void);
+/* this function handles HardFault exception */
+void HardFault_Handler(void);
+/* this function handles MemManage exception */
+void MemManage_Handler(void);
+/* this function handles BusFault exception */
+void BusFault_Handler(void);
+/* this function handles UsageFault exception */
+void UsageFault_Handler(void);
+/* this function handles DebugMon exception */
+void DebugMon_Handler(void);
+
+/* NOTE:
+ *   SVC_Handler, PendSV_Handler, SysTick_Handler are NOT declared here.
+ *   FreeRTOS port.c supplies vPortSVCHandler / xPortPendSVHandler /
+ *   xPortSysTickHandler via macro aliases in FreeRTOSConfig.h.
+ */
+
+/* ============================================================
+ *  User Project ISR declarations
+ * ============================================================ */
+/* this function handles external lines 5 to 9 interrupt request (KEY_4) */
+void EXTI5_9_IRQHandler(void);
+/* this function handles external lines 10 to 15 interrupt request (KEY_1, currently disabled) */
+void EXTI10_15_IRQHandler(void);
+/* this function handles external line 4 interrupt request (KEY_3, power key) */
+void EXTI4_IRQHandler(void);
+/* this function handles external lines 42 to 101 interrupt request (ignition) */
+void EXTI42_101_IRQHandler(void);
+/* this function handles DTM_CAN4 INT0 interrupt request (CAN4 RX) */
+void DTM_CAN4_INT0_IRQHandler(void);
+
+#endif /* GD32A7XX_IT_H */
