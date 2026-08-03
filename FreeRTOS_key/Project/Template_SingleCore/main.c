@@ -367,9 +367,9 @@ static void apply_state_to_actuators(void)
     actor_set_channel(GPIO_CH_GATE,   status.gate_enable);
 
     /* 系统状态LED指示灯控制（互斥点亮） */
-    actor_set_channel(GPIO_CH_LED_WHITE,  (status.state == SYSTEM_STATE_PRE_WARNING) ? 1U : 0U);
+    actor_set_channel(GPIO_CH_LED_WHITE,  (status.state == SYSTEM_STATE_LOW_TEMP) ? 1U : 0U);
     actor_set_channel(GPIO_CH_LED_GREEN,  (status.state == SYSTEM_STATE_NORMAL) ? 1U : 0U);
-    actor_set_channel(GPIO_CH_LED_YELLOW, (status.state == SYSTEM_STATE_WARNING) ? 1U : 0U);
+    actor_set_channel(GPIO_CH_LED_YELLOW, (status.state == SYSTEM_STATE_HIGH_TEMP) ? 1U : 0U);
     actor_set_channel(GPIO_CH_LED_RED,    (status.state == SYSTEM_STATE_DANGER) ? 1U : 0U);
 }
 
@@ -465,7 +465,7 @@ static void guard_exit(void)
  *      with a short settle delay before trusting sensor reads;
  *    - if the state machine stays at NORMAL during the whole patrol,
  *      the board is powered back off and we go back to the long sleep;
- *    - if any non-NORMAL state appears (PRE_WARNING / WARNING /
+ *    - if any non-NORMAL state appears (LOW_TEMP / HIGH_TEMP /
  *      DANGER), the board stays powered and actuators stay driven
  *      for up to GUARD_HANDLING_BUDGET_MS, sampling every
  *      GUARD_PATROL_PERIOD_MS, until we either get back to NORMAL or

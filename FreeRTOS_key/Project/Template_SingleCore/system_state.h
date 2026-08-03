@@ -25,10 +25,10 @@ extern "C" {
  *   4) 所有阈值采用宏定义，便于调试阶段直接修改并重新编译验证。
  *
  * 状态定义
- *   - NORMAL      : 正常运行状态，系统未进入明显风险区；
- *   - PRE_WARNING : 轻度风险状态，表示温度开始接近风险边界或存在轻微外部告警；
- *   - WARNING     : 中度风险状态，表示风险已经明显上升，需要持续关注；
- *   - DANGER      : 高风险状态，表示已经达到最危险区间，需要优先保证安全。
+ *   - NORMAL    : 正常运行状态，系统未进入明显风险区；
+ *   - LOW_TEMP  : 低温状态，表示温度开始接近风险边界或存在轻微外部告警；
+ *   - HIGH_TEMP : 高温预警状态，表示风险已经明显上升，需要持续关注；
+ *   - DANGER    : 危险状态，表示已经达到最危险区间，需要优先保证安全。
  *
  * 状态迁移原则
  *   1) 升级可以快速发生，不额外延迟；
@@ -45,27 +45,27 @@ extern "C" {
  *   - 这些宏定义是当前版本的主要调试入口，状态机逻辑直接使用它们。
  *
  * 阈值含义
- *   - PRE_WARNING_TEMP_C
- *       进入预警的温度门槛；
- *   - WARNING_TEMP_C
- *       进入危险的温度门槛；
+ *   - LOW_TEMP_TEMP_C
+ *       进入低温状态的温度门槛；
+ *   - HIGH_TEMP_TEMP_C
+ *       进入高温预警的温度门槛；
  *   - DANGER_TEMP_C
- *       进入最高危险的温度门槛；
+ *       进入危险状态的温度门槛；
  *   - *_CLEAR_TEMP_C
  *       各等级回落时使用的清除阈值，用于配合滞回和连续确认抑制抖动；
  *   - *_SAMPLE_MS
  *       不同状态下建议的温度采样周期，状态越危险，采样越频繁。
  */
-#define SYSTEM_STATE_DEFAULT_PRE_WARNING_TEMP_C        270U /* 进入预警的温度阈值。 */
-#define SYSTEM_STATE_DEFAULT_WARNING_TEMP_C            300U /* 进入危险的温度阈值。 */
-#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             330U /* 进入最高危险的温度阈值。 */
-//#define SYSTEM_STATE_DEFAULT_PRE_WARNING_CLEAR_TEMP_C  380U /* 预警回落到正常时的清除阈值。 */
-//#define SYSTEM_STATE_DEFAULT_WARNING_CLEAR_TEMP_C      550U /* 危险回落到预警时的清除阈值。 */
-//#define SYSTEM_STATE_DEFAULT_DANGER_CLEAR_TEMP_C       750U /* 最高危险回落到危险时的清除阈值。 */
+#define SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C           270U /* 进入低温状态的温度阈值。 */
+#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C          300U /* 进入高温预警的温度阈值。 */
+#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             330U /* 进入危险状态的温度阈值。 */
+//#define SYSTEM_STATE_DEFAULT_LOW_TEMP_CLEAR_TEMP_C     380U /* 低温回落到正常时的清除阈值。 */
+//#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_CLEAR_TEMP_C    550U /* 危险回落到高温预警时的清除阈值。 */
+//#define SYSTEM_STATE_DEFAULT_DANGER_CLEAR_TEMP_C       750U /* 危险回落到高温预警时的清除阈值。 */
 #define SYSTEM_STATE_DEFAULT_NORMAL_SAMPLE_MS          2000U /* 正常状态建议采样周期。 */
-#define SYSTEM_STATE_DEFAULT_PRE_WARNING_SAMPLE_MS     1000U /* 预警状态建议采样周期。 */
-#define SYSTEM_STATE_DEFAULT_WARNING_SAMPLE_MS          500U  /* 危险状态建议采样周期。 */
-#define SYSTEM_STATE_DEFAULT_DANGER_SAMPLE_MS           250U  /* 最高危险状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_LOW_TEMP_SAMPLE_MS        1000U /* 低温状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_SAMPLE_MS        500U  /* 高温预警状态建议采样周期。 */
+#define SYSTEM_STATE_DEFAULT_DANGER_SAMPLE_MS           250U  /* 危险状态建议采样周期。 */
 #define SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C          0U    /* 回落滞回宽度，避免阈值附近抖动。 */
 #define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      2U    /* 回落确认次数，需连续满足条件才允许降级。 */
 
@@ -76,8 +76,8 @@ extern "C" {
  */
 typedef enum {
     SYSTEM_STATE_NORMAL = 0,
-    SYSTEM_STATE_PRE_WARNING,
-    SYSTEM_STATE_WARNING,
+    SYSTEM_STATE_LOW_TEMP,
+    SYSTEM_STATE_HIGH_TEMP,
     SYSTEM_STATE_DANGER
 } system_state_t;
 

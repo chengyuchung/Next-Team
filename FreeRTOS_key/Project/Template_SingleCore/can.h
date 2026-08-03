@@ -78,8 +78,8 @@ typedef struct {
  * 系统状态帧数据：
  *   使用 1~4 表示系统状态等级：
  *     1 = NORMAL
- *     2 = PRE_WARNING
- *     3 = WARNING
+ *     2 = LOW_TEMP
+ *     3 = HIGH_TEMP
  *     4 = DANGER
  *   其余字节保留，便于后续扩展。
  */

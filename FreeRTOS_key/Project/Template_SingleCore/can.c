@@ -519,8 +519,8 @@ ErrStatus can_upload_system_state(void)
     system_state_status_t status;
     system_state_get_status(&status);
     uint8_t level = (status.state == SYSTEM_STATE_NORMAL) ? 1U :
-                    (status.state == SYSTEM_STATE_PRE_WARNING) ? 2U :
-                    (status.state == SYSTEM_STATE_WARNING) ? 3U : 4U;
+                    (status.state == SYSTEM_STATE_LOW_TEMP) ? 2U :
+                    (status.state == SYSTEM_STATE_HIGH_TEMP) ? 3U : 4U;
 #endif
     return can_send_system_state(level);
 }

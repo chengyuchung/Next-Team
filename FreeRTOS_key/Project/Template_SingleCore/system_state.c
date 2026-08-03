@@ -16,11 +16,11 @@ extern volatile uint8_t g_system_state_changed_flag;
  *   s_initialized
  *       标记状态机是否已经完成过首次初始化，避免未初始化时直接进入完整判断流程。
  *   s_normal_fall_confirm_count
- *       PRE_WARNING 回落到 NORMAL 的连续确认计数器。
- *   s_warning_fall_confirm_count
- *       WARNING 回落到 PRE_WARNING 的连续确认计数器。
+ *       LOW_TEMP 回落到 NORMAL 的连续确认计数器。
+ *   s_low_temp_fall_confirm_count
+ *       HIGH_TEMP 回落到 LOW_TEMP 的连续确认计数器。
  *   s_danger_fall_confirm_count
- *       DANGER 回落到 WARNING 的连续确认计数器。
+ *       DANGER 回落到 HIGH_TEMP 的连续确认计数器。
  */
 static system_state_status_t s_status;
 static system_state_input_t s_last_input;
@@ -28,7 +28,7 @@ static uint8_t s_last_input_valid = 0U;
 static uint8_t s_initialized = 0U;
 
 static uint8_t s_normal_fall_confirm_count = 0U;
-static uint8_t s_warning_fall_confirm_count = 0U;
+static uint8_t s_low_temp_fall_confirm_count = 0U;
 static uint8_t s_danger_fall_confirm_count = 0U;
 
 
@@ -42,18 +42,18 @@ static uint8_t s_danger_fall_confirm_count = 0U;
  *   设计说明：
  *   1) 状态越危险，采样周期越短，这样可以更快捕捉温度变化；
  *   2) NORMAL 统一使用较长的默认周期，用于降低系统负担；
- *   3) PRE_WARNING / WARNING / DANGER 则依次提高采样频率，便于更快响应风险升级。
+ *   3) LOW_TEMP / HIGH_TEMP / DANGER 则依次提高采样频率，便于更快响应风险升级。
  *
  *   注意：这里仅负责设置“建议采样周期”，真正何时采样仍由外部调度模块决定。
  */
 static void system_state_set_next_sample_period(void)
 {
     switch(s_status.state) {
-    case SYSTEM_STATE_PRE_WARNING:
-        s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_PRE_WARNING_SAMPLE_MS;
+    case SYSTEM_STATE_LOW_TEMP:
+        s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_LOW_TEMP_SAMPLE_MS;
         break;
-    case SYSTEM_STATE_WARNING:
-        s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_WARNING_SAMPLE_MS;
+    case SYSTEM_STATE_HIGH_TEMP:
+        s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_HIGH_TEMP_SAMPLE_MS;
         break;
     case SYSTEM_STATE_DANGER:
         s_status.next_temperature_sample_interval_ms = SYSTEM_STATE_DEFAULT_DANGER_SAMPLE_MS;
@@ -106,7 +106,7 @@ static void system_state_sync_common_outputs(uint32_t now_ms)
  *   处理逻辑：
  *   1) 如果目标状态与当前状态相同，则认为本次没有发生状态切换；
  *   2) 如果状态确实发生变化，则更新当前状态，并标记 state_changed；
- *   3) 对于 NORMAL / PRE_WARNING / WARNING / DANGER 这类有效运行状态，
+ *   3) 对于 NORMAL / LOW_TEMP / HIGH_TEMP / DANGER 这类有效运行状态，
  *      额外置位全局状态变化标志，便于外部模块轮询处理。
  *
  *   参数说明：
@@ -124,8 +124,8 @@ static void system_state_enter(system_state_t next, uint32_t now_ms)
     s_status.state_changed = 1U;
 
     if((next == SYSTEM_STATE_NORMAL) ||
-       (next == SYSTEM_STATE_PRE_WARNING) ||
-       (next == SYSTEM_STATE_WARNING) ||
+       (next == SYSTEM_STATE_LOW_TEMP) ||
+       (next == SYSTEM_STATE_HIGH_TEMP) ||
        (next == SYSTEM_STATE_DANGER)) {
         g_system_state_changed_flag = 1U;
     }
@@ -141,7 +141,7 @@ static void system_state_enter(system_state_t next, uint32_t now_ms)
 static void system_state_clear_fall_counters(void)
 {
     s_normal_fall_confirm_count = 0U;
-    s_warning_fall_confirm_count = 0U;
+    s_low_temp_fall_confirm_count = 0U;
     s_danger_fall_confirm_count = 0U;
 }
 
@@ -150,29 +150,29 @@ static void system_state_clear_fall_counters(void)
 
 
 /*
- * system_state_has_pre_warning
- *   判断当前输入是否满足“预警”条件。
+ * system_state_has_low_temp
+ *   判断当前输入是否满足“低温”条件。
  *   触发来源：
- *     1) 最高温度进入预警区间，但尚未达到危险阈值；
+ *     1) 最高温度进入低温区间，但尚未达到高温预警阈值；
  */
-static uint8_t system_state_has_pre_warning(const system_state_input_t *input)
+static uint8_t system_state_has_low_temp(const system_state_input_t *input)
 {
     if(input == NULL) {
         return 0U;
     }
 
-    return (uint8_t)((input->max_temperature_tenths >= (int16_t)SYSTEM_STATE_DEFAULT_PRE_WARNING_TEMP_C) &&
-                     (input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_WARNING_TEMP_C));
+    return (uint8_t)((input->max_temperature_tenths >= (int16_t)SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C) &&
+                     (input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C));
 }
 
 /*
- * system_state_has_warning
- *   判断当前输入是否满足“警告”条件。
+ * system_state_has_high_temp
+ *   判断当前输入是否满足“高温预警”条件。
  *   触发来源包括：
- *     1) 最高温度进入警告区间，但尚未达到最高危险阈值；
+ *     1) 最高温度进入高温预警区间，但尚未达到危险阈值；
  *     2) 压力异常，需要通过泄压等手段尝试恢复。
  */
-static uint8_t system_state_has_warning(const system_state_input_t *input)
+static uint8_t system_state_has_high_temp(const system_state_input_t *input)
 {
     if(input == NULL) {
         return 0U;
@@ -182,16 +182,16 @@ static uint8_t system_state_has_warning(const system_state_input_t *input)
         return 1U;
     }
 
-    return (uint8_t)((input->max_temperature_tenths >= (int16_t)SYSTEM_STATE_DEFAULT_WARNING_TEMP_C) &&
+    return (uint8_t)((input->max_temperature_tenths >= (int16_t)SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C) &&
                      (input->max_temperature_tenths < (int16_t)SYSTEM_STATE_DEFAULT_DANGER_TEMP_C));
 }
 
 /*
  * system_state_has_danger
- *   判断当前输入是否已达到最高危险区间。
+ *   判断当前输入是否已达到危险区间。
  *   触发来源包括：
  *     1) 气体泄露告警；
- *     2) 最高温度进入最高危险区间。
+ *     2) 最高温度进入危险区间。
  *
  *   一旦满足任一条件，应立即进入 DANGER。
  */
@@ -241,7 +241,7 @@ static uint8_t system_state_handle_fall_confirm(uint8_t condition_met,
 
 /*
  * system_state_can_fall_to_normal
- *   判断是否满足从 PRE_WARNING 回落到 NORMAL 的条件。
+ *   判断是否满足从 LOW_TEMP 回落到 NORMAL 的条件。
  *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
  */
 static uint8_t system_state_can_fall_to_normal(const system_state_input_t *input)
@@ -251,34 +251,34 @@ static uint8_t system_state_can_fall_to_normal(const system_state_input_t *input
     }
 
     return system_state_handle_fall_confirm(
-        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_PRE_WARNING_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
+        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
         &s_normal_fall_confirm_count,
         0U);
 }
 
 /*
- * system_state_can_fall_to_pre_warning_from_warning
- *   判断是否满足从 WARNING 回落到 PRE_WARNING 的条件。
+ * system_state_can_fall_to_low_temp_from_high_temp
+ *   判断是否满足从 HIGH_TEMP 回落到 LOW_TEMP 的条件。
  *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
  */
-static uint8_t system_state_can_fall_to_pre_warning_from_warning(const system_state_input_t *input)
+static uint8_t system_state_can_fall_to_low_temp_from_high_temp(const system_state_input_t *input)
 {
     if(input == NULL) {
         return 0U;
     }
 
     return system_state_handle_fall_confirm(
-        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_WARNING_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
-        &s_warning_fall_confirm_count,
+        (uint8_t)(input->max_temperature_tenths < (int16_t)(SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C - SYSTEM_STATE_DEFAULT_CLEAR_HYSTERESIS_C)),
+        &s_low_temp_fall_confirm_count,
         0U);
 }
 
 /*
- * system_state_can_fall_to_warning_from_danger
- *   判断是否满足从 DANGER 回落到 WARNING 的条件。
+ * system_state_can_fall_to_high_temp_from_danger
+ *   判断是否满足从 DANGER 回落到 HIGH_TEMP 的条件。
  *   该函数内部已经包含连续确认逻辑，调用方只需关注最终是否允许回落。
  */
-static uint8_t system_state_can_fall_to_warning_from_danger(const system_state_input_t *input)
+static uint8_t system_state_can_fall_to_high_temp_from_danger(const system_state_input_t *input)
 {
     if(input == NULL) {
         return 0U;
@@ -338,8 +338,8 @@ void system_state_reset(void)
 void system_state_task(const system_state_input_t *input)
 {
     uint32_t now_ms;
-    uint8_t has_pre_warning;
-    uint8_t has_warning;
+    uint8_t has_low_temp;
+    uint8_t has_high_temp;
     uint8_t has_danger;
     uint8_t i;
 
@@ -362,14 +362,14 @@ void system_state_task(const system_state_input_t *input)
 
     /*
      * 预先计算各风险等级条件：
-     *   - 气体泄露直接进入最高危险，判定由 system_state_has_danger() 统一负责；
-     *   - 压力异常归入警告，判定由 system_state_has_warning() 统一负责；
-     *   - 温度按门槛分级进入预警/警告/危险。
+     *   - 气体泄露直接进入危险状态，判定由 system_state_has_danger() 统一负责；
+     *   - 压力异常归入高温预警，判定由 system_state_has_high_temp() 统一负责；
+     *   - 温度按门槛分级进入低温/高温预警/危险。
      */
     has_danger = system_state_has_danger(input);
-    has_warning = (uint8_t)(!has_danger && system_state_has_warning(input));
-    has_pre_warning = (uint8_t)(!has_danger && !has_warning &&
-                                system_state_has_pre_warning(input));
+    has_high_temp = (uint8_t)(!has_danger && system_state_has_high_temp(input));
+    has_low_temp = (uint8_t)(!has_danger && !has_high_temp &&
+                                system_state_has_low_temp(input));
 
     switch(s_status.state) {
     case SYSTEM_STATE_NORMAL:
@@ -387,22 +387,22 @@ void system_state_task(const system_state_input_t *input)
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
-        } else if(has_warning != 0U) {
+        } else if(has_high_temp != 0U) {
             system_state_clear_fall_counters();
-            system_state_enter(SYSTEM_STATE_WARNING, now_ms);
-        } else if(has_pre_warning != 0U) {
+            system_state_enter(SYSTEM_STATE_HIGH_TEMP, now_ms);
+        } else if(has_low_temp != 0U) {
             system_state_clear_fall_counters();
-            system_state_enter(SYSTEM_STATE_PRE_WARNING, now_ms);
+            system_state_enter(SYSTEM_STATE_LOW_TEMP, now_ms);
         }
         break;
 
-    case SYSTEM_STATE_PRE_WARNING:
+    case SYSTEM_STATE_LOW_TEMP:
         s_status.fan_enable = 1;
         s_status.fan_duty_percent = 80U;
         s_status.pump_enable = 1U;
         s_status.pump_duty_percent = 80U;
         s_status.gate_enable = 0U;
-        /* PRE_WARNING: 关闭所有PTC加热片，启动4路制冷 */
+        /* LOW_TEMP: 关闭所有PTC加热片，启动4路制冷 */
         for(i = 0U; i < 4U; i++) {
             s_status.cooler_enable[i] = 1U;
             s_status.heater_enable[i] = 0U;
@@ -411,22 +411,22 @@ void system_state_task(const system_state_input_t *input)
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
-        } else if(has_warning != 0U) {
+        } else if(has_high_temp != 0U) {
             system_state_clear_fall_counters();
-            system_state_enter(SYSTEM_STATE_WARNING, now_ms);
+            system_state_enter(SYSTEM_STATE_HIGH_TEMP, now_ms);
         } else if(system_state_can_fall_to_normal(input) != 0U) {
             system_state_enter(SYSTEM_STATE_NORMAL, now_ms);
             system_state_clear_fall_counters();
         }
         break;
 
-    case SYSTEM_STATE_WARNING:
+    case SYSTEM_STATE_HIGH_TEMP:
         s_status.fan_enable = 1U;
         s_status.fan_duty_percent = 80U;
         s_status.pump_enable = 1U;
         s_status.pump_duty_percent = 80U;
         s_status.gate_enable = 1U;
-        /* WARNING: 4路制冷片全开，PTC加热片全开（混合控温策略） */
+        /* HIGH_TEMP: 4路制冷片全开，PTC加热片全开（混合控温策略） */
         for(i = 0U; i < 4U; i++) {
             s_status.cooler_enable[i] = 1U;
             s_status.heater_enable[i] = 1U;
@@ -435,10 +435,10 @@ void system_state_task(const system_state_input_t *input)
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
-        } else if(has_warning != 0U) {
-            s_warning_fall_confirm_count = 0U;
-        } else if(system_state_can_fall_to_pre_warning_from_warning(input) != 0U) {
-            system_state_enter(SYSTEM_STATE_PRE_WARNING, now_ms);
+        } else if(has_high_temp != 0U) {
+            s_low_temp_fall_confirm_count = 0U;
+        } else if(system_state_can_fall_to_low_temp_from_high_temp(input) != 0U) {
+            system_state_enter(SYSTEM_STATE_LOW_TEMP, now_ms);
             system_state_clear_fall_counters();
         }
         break;
@@ -458,8 +458,8 @@ void system_state_task(const system_state_input_t *input)
         s_status.buzzer_enable = 1U;
         if(has_danger != 0U) {
             s_danger_fall_confirm_count = 0U;
-        } else if(system_state_can_fall_to_warning_from_danger(input) != 0U) {
-            system_state_enter(SYSTEM_STATE_WARNING, now_ms);
+        } else if(system_state_can_fall_to_high_temp_from_danger(input) != 0U) {
+            system_state_enter(SYSTEM_STATE_HIGH_TEMP, now_ms);
             system_state_clear_fall_counters();
         }
         break;
