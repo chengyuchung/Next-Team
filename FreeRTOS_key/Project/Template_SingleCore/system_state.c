@@ -378,17 +378,18 @@ void system_state_task(const system_state_input_t *input)
 
     switch(s_status.state) {
     case SYSTEM_STATE_NORMAL:
-        s_status.fan_enable = 0U;
-        s_status.fan_duty_percent = 0U;
-        s_status.pump_enable = 0U;
-        s_status.pump_duty_percent = 0U;
-        s_status.gate_enable = 0U;
-        /* NORMAL: 4个PTC加热片全部开启，制冷片关闭 */
+        /* NORMAL: 正常运行状态 */
+        s_status.fan_enable = 1U;
+        s_status.fan_duty_percent = 50U;        /* 风扇 50% 占空比 */
+        s_status.pump_enable = 1U;
+        s_status.pump_duty_percent = 50U;       /* 水泵 50% 占空比 */
+        s_status.gate_enable = 0U;              /* 排气阀关闭 */
+        /* 关闭所有 PTC 加热片，关闭所有制冷片 */
         for(i = 0U; i < 4U; i++) {
+            s_status.heater_enable[i] = 0U;
             s_status.cooler_enable[i] = 0U;
-            s_status.heater_enable[i] = 1U;
         }
-        s_status.buzzer_enable = 0U;
+        s_status.buzzer_enable = 0U;            /* 蜂鸣器关闭 */
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
@@ -402,17 +403,18 @@ void system_state_task(const system_state_input_t *input)
         break;
 
     case SYSTEM_STATE_LOW_TEMP:
-        s_status.fan_enable = 1;
-        s_status.fan_duty_percent = 80U;
-        s_status.pump_enable = 1U;
-        s_status.pump_duty_percent = 80U;
-        s_status.gate_enable = 0U;
-        /* LOW_TEMP: 关闭所有PTC加热片，启动4路制冷 */
+        /* LOW_TEMP: 低温状态 */
+        s_status.fan_enable = 0U;
+        s_status.fan_duty_percent = 0U;         /* 风扇关闭 */
+        s_status.pump_enable = 0U;
+        s_status.pump_duty_percent = 0U;        /* 水泵关闭 */
+        s_status.gate_enable = 0U;              /* 排气阀关闭 */
+        /* 启动 4 路 PTC 加热片，关闭所有制冷片 */
         for(i = 0U; i < 4U; i++) {
-            s_status.cooler_enable[i] = 1U;
-            s_status.heater_enable[i] = 0U;
+            s_status.heater_enable[i] = 1U;
+            s_status.cooler_enable[i] = 0U;
         }
-        s_status.buzzer_enable = 0U;
+        s_status.buzzer_enable = 0U;            /* 蜂鸣器关闭 */
         if(has_danger != 0U) {
             /* 温度骤升或气体告警：跨级快速切换到 DANGER，不额外延迟 */
             system_state_clear_fall_counters();
@@ -430,17 +432,18 @@ void system_state_task(const system_state_input_t *input)
         break;
 
     case SYSTEM_STATE_HIGH_TEMP:
+        /* HIGH_TEMP: 高温预警状态 */
         s_status.fan_enable = 1U;
-        s_status.fan_duty_percent = 80U;
+        s_status.fan_duty_percent = 80U;        /* 风扇 80% 占空比 */
         s_status.pump_enable = 1U;
-        s_status.pump_duty_percent = 80U;
-        s_status.gate_enable = 1U;
-        /* HIGH_TEMP: 4路制冷片全开，PTC加热片全开（混合控温策略） */
+        s_status.pump_duty_percent = 80U;       /* 水泵 80% 占空比 */
+        s_status.gate_enable = 1U;              /* 打开排气阀泄压 */
+        /* 关闭所有 PTC 加热片，关闭所有制冷片 */
         for(i = 0U; i < 4U; i++) {
-            s_status.cooler_enable[i] = 1U;
-            s_status.heater_enable[i] = 1U;
+            s_status.heater_enable[i] = 0U;
+            s_status.cooler_enable[i] = 0U;
         }
-        s_status.buzzer_enable = 0U;
+        s_status.buzzer_enable = 0U;            /* 蜂鸣器关闭 */
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
             system_state_enter(SYSTEM_STATE_DANGER, now_ms);
@@ -458,17 +461,18 @@ void system_state_task(const system_state_input_t *input)
 
     case SYSTEM_STATE_DANGER:
     default:
+        /* DANGER: 危险紧急状态 */
         s_status.fan_enable = 1U;
-        s_status.fan_duty_percent = 100U;
+        s_status.fan_duty_percent = 100U;       /* 风扇 100% 全速运行 */
         s_status.pump_enable = 1U;
-        s_status.pump_duty_percent = 100U;
-        s_status.gate_enable = 1U;
-        /* DANGER: 4路制冷片全开，关闭所有PTC加热片，全力制冷+泄压 */
+        s_status.pump_duty_percent = 100U;      /* 水泵 100% 全速运行 */
+        s_status.gate_enable = 1U;              /* 打开排气阀泄压 */
+        /* 关闭所有 PTC 加热片，全开 4 路 TEC 制冷片强制降温 */
         for(i = 0U; i < 4U; i++) {
-            s_status.cooler_enable[i] = 1U;
             s_status.heater_enable[i] = 0U;
+            s_status.cooler_enable[i] = 1U;
         }
-        s_status.buzzer_enable = 1U;
+        s_status.buzzer_enable = 1U;            /* 开启蜂鸣器报警 */
         if(has_danger != 0U) {
             s_danger_fall_confirm_count = 0U;
         } else if(system_state_can_fall_from_danger(input) != 0U) {
