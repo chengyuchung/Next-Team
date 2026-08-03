@@ -37,11 +37,21 @@ static actor_config_t s_cfg;
  *   - 仅保留执行器控制引脚；
  */
 static const actor_pin_map_t s_pin_map[GPIO_CH_MAX] = {
-    { GPIOF, GPIO_PIN_6 },   /* cooler    PF6  */
-    { GPIOF, GPIO_PIN_0 },   /* heater    PF0  */
-    { GPIOF, GPIO_PIN_9 },   /* buzzer    PF9  */
-    { GPIOF, GPIO_PIN_10 },  /* exhaust   PF10 */
-    { GPIOG, GPIO_PIN_0 },   /* relay pwr PG0  */
+    { GPIOF, GPIO_PIN_6 },   /* cooler1    PF6  - 制冷片1 (电池包方向1) */
+    { GPIOF, GPIO_PIN_7 },   /* cooler2    PF7  - 制冷片2 (电池包方向2) */
+    { GPIOF, GPIO_PIN_8 },   /* cooler3    PF8  - 制冷片3 (电池包方向3) */
+    { GPIOF, GPIO_PIN_11 },  /* cooler4    PF11 - 制冷片4 (电池包方向4) */
+    { GPIOF, GPIO_PIN_1 },   /* heater1    PF1  - PTC加热片1 (电池包方向1) */
+    { GPIOF, GPIO_PIN_2 },   /* heater2    PF2  - PTC加热片2 (电池包方向2) */
+    { GPIOF, GPIO_PIN_3 },   /* heater3    PF3  - PTC加热片3 (电池包方向3) */
+    { GPIOF, GPIO_PIN_4 },   /* heater4    PF4  - PTC加热片4 (电池包方向4) */
+    { GPIOF, GPIO_PIN_9 },   /* buzzer     PF9  */
+    { GPIOF, GPIO_PIN_10 },  /* gate       PF10 */
+    { GPIOG, GPIO_PIN_0 },   /* relay_pwr  PG0  */
+    { GPIOE, GPIO_PIN_10 },  /* led_white  PE10 - 低温白灯 */
+    { GPIOE, GPIO_PIN_11 },  /* led_green  PE11 - 正常绿灯 */
+    { GPIOE, GPIO_PIN_12 },  /* led_yellow PE12 - 高温黄灯 */
+    { GPIOE, GPIO_PIN_13 },  /* led_red    PE13 - 危险红灯 */
 };
 
 /*

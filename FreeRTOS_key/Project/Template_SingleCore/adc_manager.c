@@ -26,7 +26,7 @@
 #endif
 
 #ifndef ADC_MANAGER_CHANNEL_COUNT
-#define ADC_MANAGER_CHANNEL_COUNT           4U
+#define ADC_MANAGER_CHANNEL_COUNT           2U
 #endif
 
 #ifndef ADC_MANAGER_SAMPLE_TIME_DEFAULT
@@ -45,13 +45,13 @@
 static uint8_t s_inited = 0U;
 
 /* 逻辑通道 -> 硬件资源映射表。
- * 历史说明：原 MQ9_GAS 通道（PE5/ADC ch4/rank 0）已迁至 DO 数字输入，移除该行后需同步减小
- *           ADC_MANAGER_CHANNEL_COUNT，避免循环越界读到相邻内存。 */
+ * 引脚定义（2026-08-03 优化）：
+ *   - 加热片1电流监测 : PH8 / ADC0_IN12（对应4路加热片总电流）
+ *   - 制冷片1电流监测 : PH7 / ADC0_IN13（对应4路制冷片总电流）
+ */
 static const adc_manager_channel_cfg_t s_cfg[ADC_MANAGER_CHANNEL_COUNT] = {
-    {ADC_MANAGER_CH_FAN_CURRENT,    RCU_GPIOE, GPIOE, GPIO_PIN_6,  3U,  ADC_MANAGER_SAMPLE_TIME_DEFAULT, 0U},
-    {ADC_MANAGER_CH_PUMP_CURRENT,   RCU_GPIOB, GPIOB, GPIO_PIN_11, 15U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 1U},
-    {ADC_MANAGER_CH_COOLER_CURRENT, RCU_GPIOH, GPIOH, GPIO_PIN_7,  13U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 2U},
-    {ADC_MANAGER_CH_GATE_CURRENT,   RCU_GPIOH, GPIOH, GPIO_PIN_8,  12U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 3U}
+    {ADC_MANAGER_CH_HEATER1_CURRENT, RCU_GPIOH, GPIOH, GPIO_PIN_8,  12U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 0U},  /* PH8  - 加热片1电流 ADC0_IN12 */
+    {ADC_MANAGER_CH_COOLER1_CURRENT, RCU_GPIOH, GPIOH, GPIO_PIN_7,  13U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 1U}   /* PH7  - 制冷片1电流 ADC0_IN13 */
 };
 
 /* ========================================================================== */

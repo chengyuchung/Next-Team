@@ -100,10 +100,11 @@ typedef enum {
  *       水泵使能标志。由状态机给出基础裁决，具体执行方式由执行器模块完成；
  *   gate_enable
  *       泄压阀使能标志。用于执行泄压动作，具体执行方式由执行器模块完成；
- *   cooling_enable
- *       制冷片使能标志。由状态机给出基础裁决，具体执行方式由执行器模块完成；
- *   heating_enable
- *       加热允许标志。当前版本预留，便于后续扩展热管理策略；
+ *   cooler_enable[4]
+ *       制冷片使能数组。对应电池包4个方向的独立控温；
+ *   heater_enable[4]
+ *       PTC加热片使能数组。对应电池包4个方向的独立控温；
+ *       统一加热模式下4路同时响应；分区模式下可独立控制；
  *   buzzer_enable
  *       蜂鸣器使能，用于告警提示；
  *   next_temperature_sample_interval_ms
@@ -117,8 +118,8 @@ typedef struct {
     uint8_t pump_enable;
     uint8_t pump_duty_percent;
     uint8_t gate_enable;
-    uint8_t cooling_enable;
-    uint8_t heating_enable;
+    uint8_t cooler_enable[4];     /* 制冷片1-4独立使能 */
+    uint8_t heater_enable[4];     /* PTC加热片1-4独立使能 */
     uint8_t buzzer_enable;
     uint32_t next_temperature_sample_interval_ms;
 } system_state_status_t;

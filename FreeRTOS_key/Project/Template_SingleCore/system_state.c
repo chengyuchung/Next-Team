@@ -81,14 +81,17 @@ static void system_state_set_next_sample_period(void)
  */
 static void system_state_sync_common_outputs(uint32_t now_ms)
 {
+    uint8_t i;
     s_status.state_changed = 0U;
     s_status.fan_enable = 0U;
     s_status.fan_duty_percent = 0U;
     s_status.pump_enable = 0U;
     s_status.pump_duty_percent = 0U;
     s_status.gate_enable = 0U;
-    s_status.cooling_enable = 0U;
-    s_status.heating_enable = 0U;
+    for(i = 0U; i < 4U; i++) {
+        s_status.cooler_enable[i] = 0U;
+        s_status.heater_enable[i] = 0U;
+    }
     s_status.buzzer_enable = 0U;
     g_system_state_changed_flag = 0U;
 }
@@ -338,6 +341,7 @@ void system_state_task(const system_state_input_t *input)
     uint8_t has_pre_warning;
     uint8_t has_warning;
     uint8_t has_danger;
+    uint8_t i;
 
     if(s_initialized == 0U) {
         system_state_init();
@@ -374,8 +378,11 @@ void system_state_task(const system_state_input_t *input)
         s_status.pump_enable = 0U;
         s_status.pump_duty_percent = 0U;
         s_status.gate_enable = 0U;
-        s_status.cooling_enable = 0U;
-        s_status.heating_enable = 1U;
+        /* NORMAL: 4个PTC加热片全部开启，制冷片关闭 */
+        for(i = 0U; i < 4U; i++) {
+            s_status.cooler_enable[i] = 0U;
+            s_status.heater_enable[i] = 1U;
+        }
         s_status.buzzer_enable = 0U;
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
@@ -395,8 +402,11 @@ void system_state_task(const system_state_input_t *input)
         s_status.pump_enable = 1U;
         s_status.pump_duty_percent = 80U;
         s_status.gate_enable = 0U;
-        s_status.cooling_enable = 1U;
-        s_status.heating_enable =0;
+        /* PRE_WARNING: 关闭所有PTC加热片，启动4路制冷 */
+        for(i = 0U; i < 4U; i++) {
+            s_status.cooler_enable[i] = 1U;
+            s_status.heater_enable[i] = 0U;
+        }
         s_status.buzzer_enable = 0U;
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
@@ -416,8 +426,11 @@ void system_state_task(const system_state_input_t *input)
         s_status.pump_enable = 1U;
         s_status.pump_duty_percent = 80U;
         s_status.gate_enable = 1U;
-        s_status.cooling_enable =1U;
-        s_status.heating_enable = 1U;
+        /* WARNING: 4路制冷片全开，PTC加热片全开（混合控温策略） */
+        for(i = 0U; i < 4U; i++) {
+            s_status.cooler_enable[i] = 1U;
+            s_status.heater_enable[i] = 1U;
+        }
         s_status.buzzer_enable = 0U;
         if(has_danger != 0U) {
             system_state_clear_fall_counters();
@@ -437,8 +450,11 @@ void system_state_task(const system_state_input_t *input)
         s_status.pump_enable = 1U;
         s_status.pump_duty_percent = 100U;
         s_status.gate_enable = 1U;
-        s_status.cooling_enable = 1U;
-        s_status.heating_enable = 0U;
+        /* DANGER: 4路制冷片全开，关闭所有PTC加热片，全力制冷+泄压 */
+        for(i = 0U; i < 4U; i++) {
+            s_status.cooler_enable[i] = 1U;
+            s_status.heater_enable[i] = 0U;
+        }
         s_status.buzzer_enable = 1U;
         if(has_danger != 0U) {
             s_danger_fall_confirm_count = 0U;

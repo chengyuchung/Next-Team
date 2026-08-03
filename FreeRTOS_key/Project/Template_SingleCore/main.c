@@ -351,10 +351,26 @@ static void apply_state_to_actuators(void)
     pwm_set_enable(PWM_PUMP, status.pump_enable);
     pwm_set_duty_percent(PWM_PUMP, status.pump_duty_percent);
 
-    actor_set_channel(GPIO_CH_COOLER, status.cooling_enable);
-    actor_set_channel(GPIO_CH_HEATER, status.heating_enable);
+    /* 4个制冷片独立控制 */
+    actor_set_channel(GPIO_CH_COOLER1, status.cooler_enable[0]);
+    actor_set_channel(GPIO_CH_COOLER2, status.cooler_enable[1]);
+    actor_set_channel(GPIO_CH_COOLER3, status.cooler_enable[2]);
+    actor_set_channel(GPIO_CH_COOLER4, status.cooler_enable[3]);
+
+    /* 4个PTC加热片独立控制 */
+    actor_set_channel(GPIO_CH_HEATER1, status.heater_enable[0]);
+    actor_set_channel(GPIO_CH_HEATER2, status.heater_enable[1]);
+    actor_set_channel(GPIO_CH_HEATER3, status.heater_enable[2]);
+    actor_set_channel(GPIO_CH_HEATER4, status.heater_enable[3]);
+
     actor_set_channel(GPIO_CH_BUZZER, status.buzzer_enable);
     actor_set_channel(GPIO_CH_GATE,   status.gate_enable);
+
+    /* 系统状态LED指示灯控制（互斥点亮） */
+    actor_set_channel(GPIO_CH_LED_WHITE,  (status.state == SYSTEM_STATE_PRE_WARNING) ? 1U : 0U);
+    actor_set_channel(GPIO_CH_LED_GREEN,  (status.state == SYSTEM_STATE_NORMAL) ? 1U : 0U);
+    actor_set_channel(GPIO_CH_LED_YELLOW, (status.state == SYSTEM_STATE_WARNING) ? 1U : 0U);
+    actor_set_channel(GPIO_CH_LED_RED,    (status.state == SYSTEM_STATE_DANGER) ? 1U : 0U);
 }
 
 /* ============================================================

@@ -503,7 +503,9 @@ ErrStatus can_upload_state(void)
     system_state_get_status(&status);
     uint8_t fan_duty = status.fan_duty_percent;
     uint8_t pump_duty = status.pump_duty_percent;
-    uint8_t cooler_on = status.cooling_enable;
+    /* 制冷片状态：4路中任意一路开启则cooler_on=1 */
+    uint8_t cooler_on = (uint8_t)(status.cooler_enable[0] | status.cooler_enable[1] |
+                                   status.cooler_enable[2] | status.cooler_enable[3]);
     uint8_t gate_on = status.gate_enable;
 #endif
     return can_send_state(fan_duty, pump_duty, cooler_on, gate_on);
@@ -536,21 +538,19 @@ ErrStatus can_upload_fault(void)
 #else
     system_state_input_t input;
     fault_manager_status_t fault_status;
-    uint8_t fault_fan = 0U;
-    uint8_t fault_pump = 0U;
-    uint8_t fault_cool = 0U;
-    uint8_t fault_gate = 0U;
+    uint8_t fault_heater = 0U;
+    uint8_t fault_cooler = 0U;
     uint8_t fault_temp_sensor = 0U;
     uint8_t fault_press_sensor = 0U;
     uint8_t fault_gas_sensor = 0U;
 
     system_state_get_input(&input);
-    fault_manager_get_act_fault(&fault_fan, &fault_pump, &fault_cool, &fault_gate);
+    fault_manager_get_act_fault(&fault_heater, &fault_cooler);
     fault_temp_sensor = (input.temperature_valid != 0U) ? 0U : 1U;
     fault_press_sensor = (input.pressure_valid != 0U) ? 0U : 1U;
     fault_gas_sensor = (input.gas_valid != 0U) ? 0U : 1U;
 #endif
-    return can_send_fault(fault_fan, fault_pump, fault_cool, fault_gate, fault_temp_sensor, fault_press_sensor, fault_gas_sensor);
+    return can_send_fault(fault_heater, fault_cooler, 0U, 0U, fault_temp_sensor, fault_press_sensor, fault_gas_sensor);
 }
 
 ErrStatus can_send_state(uint8_t fan_duty, uint8_t pump_duty, uint8_t cooler_on, uint8_t gate_on)

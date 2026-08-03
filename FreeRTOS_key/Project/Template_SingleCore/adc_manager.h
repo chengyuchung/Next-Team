@@ -31,13 +31,15 @@ extern "C" {
  *   - 增删通道时，需同步修改源文件中的通道配置表与数量宏；
  *   - 历史说明：MQ9 早期走 AO 模拟量采样（通道 0 -> PE5），已迁至 DO 数字输入，本枚举不再保留。
  *   - ADC_MANAGER_CH_MAX 为边界值，不是有效可采样通道。
+ *
+ * 通道定义（2026-08-03 优化）：
+ *   - 加热片1电流监测 : PH8 / ADC0_IN12（对应4路加热片总电流）
+ *   - 制冷片1电流监测 : PH7 / ADC0_IN13（对应4路制冷片总电流）
  */
 typedef enum {
-    ADC_MANAGER_CH_FAN_CURRENT = 0,   /* 风扇电流采样通道 */
-    ADC_MANAGER_CH_PUMP_CURRENT,      /* 水泵电流采样通道 */
-    ADC_MANAGER_CH_COOLER_CURRENT,    /* 制冷器电流采样通道 */
-    ADC_MANAGER_CH_GATE_CURRENT,      /* 排气阀电流采样通道 */
-    ADC_MANAGER_CH_MAX                /* 通道总数（边界标识） */
+    ADC_MANAGER_CH_HEATER1_CURRENT = 0,  /* 加热片1电流采样 (PH8/ADC0_IN12) */
+    ADC_MANAGER_CH_COOLER1_CURRENT,     /* 制冷片1电流采样 (PH7/ADC0_IN13) */
+    ADC_MANAGER_CH_MAX                  /* 通道总数（边界标识） */
 } adc_manager_channel_t;
 
 /*
