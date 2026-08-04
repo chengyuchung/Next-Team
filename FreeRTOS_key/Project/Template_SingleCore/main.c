@@ -44,6 +44,7 @@
 #include "can.h"
 #include "watchdog.h"
 #include "bmp280.h"
+#include "temp_sensor.h"
 #include "adc_manager.h"
 #include "mq9.h"
 #include "motor_pwm_gd32.h"
@@ -244,6 +245,9 @@ static void board_init(void)
 
     (void)bmp280_init(BMP280_I2C_ADDR_0X76);
 
+    /* 4路DS18B20：分区测温，每路对应一个加热/制冷分区 */
+    temp_sensor_init();
+
     /* adc_manager_init();  // TODO: re-enable once power-up hang is resolved */
 
     mq9_init(NULL);
@@ -305,24 +309,41 @@ static void system_state_update_input(uint32_t now_ms)
 {
     system_state_input_t input = {0};
     bmp280_data_t bmp_result = {0};
+    temp_result_t temp_result = {0};
     mq9_result_t gas_result = {0};
 
     input.now_ms = now_ms;
     input.ignition_on = s_ignition_on;
 
+    /* 4路DS18B20分区测温：下标i对应加热片(i+1)/制冷片(i+1)所在分区，
+     * 直接按分区填入 zone_temperature_tenths/zone_temp_valid，供状态机
+     * 分区独立判断使用。 */
+    if(temp_get(&temp_result) != 0U) {
+        uint8_t zi;
+        input.temperature_valid = temp_result.valid;
+        input.temp_sensor_valid_count = temp_result.valid_count;
+        input.temp_sensor_fault_mask = temp_result.fault_mask;
+        for(zi = 0U; zi < 4U; zi++) {
+            input.zone_temperature_tenths[zi] = temp_result.temperature[zi];
+            input.zone_temp_valid[zi] = temp_result.channel_valid[zi];
+        }
+    } else {
+        uint8_t zi;
+        input.temperature_valid = 0U;
+        input.temp_sensor_valid_count = 0U;
+        input.temp_sensor_fault_mask = 0x0FU;
+        for(zi = 0U; zi < 4U; zi++) {
+            input.zone_temperature_tenths[zi] = 0;
+            input.zone_temp_valid[zi] = 0U;
+        }
+    }
+
+    /* BMP280 只负责压力监测（泄压判断），不再参与温度风险判断。 */
     if(pressure_get(&bmp_result) != 0U) {
-        input.temperature_valid = bmp_result.valid;
-        input.temp_sensor_valid_count = 1U;
-        input.temp_sensor_fault_mask = 0U;
-        input.max_temperature_tenths = (int16_t)(bmp_result.temperature_centi_c / 10);
         input.pressure_valid = bmp_result.valid;
         input.pressure_pa = bmp_result.pressure_pa;
         input.pressure_alarm = bmp_result.alarm;
     } else {
-        input.temperature_valid = 0U;
-        input.temp_sensor_valid_count = 0U;
-        input.temp_sensor_fault_mask = 0x0FU;
-        input.max_temperature_tenths = 0;
         input.pressure_valid = 0U;
         input.pressure_pa = 0;
         input.pressure_alarm = 0U;

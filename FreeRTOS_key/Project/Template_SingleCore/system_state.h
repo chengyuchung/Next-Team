@@ -60,10 +60,15 @@ extern "C" {
 #define SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C           150U /* 低温阈值：低于 15.0°C 进入低温状态。 */
 #define SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C          270U /* 高温阈值：达到 27.0°C 进入高温预警状态。 */
 #define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             330U /* 危险阈值：达到 33.0°C 进入危险状态。 */
-#define SYSTEM_STATE_DEFAULT_NORMAL_SAMPLE_MS          2000U /* 正常状态建议采样周期。 */
-#define SYSTEM_STATE_DEFAULT_LOW_TEMP_SAMPLE_MS        1000U /* 低温状态建议采样周期。 */
-#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_SAMPLE_MS        500U  /* 高温预警状态建议采样周期。 */
-#define SYSTEM_STATE_DEFAULT_DANGER_SAMPLE_MS           250U  /* 危险状态建议采样周期。 */
+/*
+ * 统一采样周期说明
+ *   DS18B20 采用并行转换策略（启动4路 → 等待750ms → 读取数据），
+ *   4路完整读取约需 788ms。为保证稳定可靠，采样周期设为 1000ms，
+ *   留有约 200ms 余量。
+ *   温度是惯性大的物理量，1秒采样一次对于电池包热管理完全足够，
+ *   不必随危险等级动态调整采样频率。
+ */
+#define SYSTEM_STATE_DEFAULT_SAMPLE_MS             1000U /* 统一采样周期 1s */
 #define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      2U    /* 回落确认次数，需连续满足条件才允许降级。 */
 
 /*
@@ -102,6 +107,11 @@ typedef enum {
  *   heater_enable[4]
  *       PTC加热片使能数组。对应电池包4个方向的独立控温；
  *       统一加热模式下4路同时响应；分区模式下可独立控制；
+ *   zone_state[4]
+ *       每个分区（对应加热片/制冷片编号1-4）各自独立判断出的风险等级。
+ *       heater_enable[i] / cooler_enable[i] 由 zone_state[i] 独立驱动；
+ *       state 字段则是4个分区归约后的全局等级，供风扇/水泵/泄压阀/
+ *       蜂鸣器/点火许可等共享设备使用；
  *   buzzer_enable
  *       蜂鸣器使能，用于告警提示；
  *   ignition_allowed
@@ -121,6 +131,7 @@ typedef struct {
     uint8_t gate_enable;
     uint8_t cooler_enable[4];     /* 制冷片1-4独立使能 */
     uint8_t heater_enable[4];     /* PTC加热片1-4独立使能 */
+    system_state_t zone_state[4]; /* 分区1-4各自独立的风险等级 */
     uint8_t buzzer_enable;
     uint8_t ignition_allowed;     /* 点火许可，DANGER 状态下强制为0 */
     uint32_t next_temperature_sample_interval_ms;
@@ -140,13 +151,16 @@ typedef struct {
  *       决定是否进入更高风险等级；
  *   pressure_valid
  *       压力数据整体是否有效。若为无效，则状态机不执行压力相关判断；
- *   max_temperature_tenths
- *       当前时刻温度统计中的最高温度，单位为 0.1°C。状态机只采用该值进行温度风险判断，
- *       因为它最能反映最危险的局部热点；
+ *   zone_temperature_tenths[4]
+ *       4个分区各自的温度，单位为 0.1°C。下标i对应加热片(i+1)/制冷片(i+1)所在分区，
+ *       即 zone_temperature_tenths[i] 与 heater_enable[i]/cooler_enable[i] 是同一分区；
+ *   zone_temp_valid[4]
+ *       4个分区各自的温度是否有效。若某分区无效，状态机对该分区维持上一次的
+ *       zone_state[i]（沿用最后一次已知状态），不因传感器故障而误判；
  *   temp_sensor_valid_count
- *       有效温度点数量。当前版本未直接参与决策，但保留用于后续一致性判断；
+ *       有效温度点数量（0-4）。当前版本未直接参与决策，但保留用于后续一致性判断；
  *   temperature_valid
- *       温度数据整体是否有效。若为无效，则状态机不执行温度风险判断，只维持基础状态；
+ *       温度数据整体是否有效（至少一路有效）。若为无效，则状态机不执行温度风险判断，只维持基础状态；
  *   now_ms
  *       当前系统时间戳，单位为毫秒。用于状态切换时的时间基准和采样周期管理；
  *   ignition_on
@@ -158,7 +172,8 @@ typedef struct {
     uint8_t pressure_alarm;
     int32_t pressure_pa;
     uint8_t pressure_valid;
-    int16_t max_temperature_tenths;
+    int16_t zone_temperature_tenths[4];
+    uint8_t zone_temp_valid[4];
     uint8_t temp_sensor_valid_count;
     uint8_t temp_sensor_fault_mask;
     uint8_t temperature_valid;

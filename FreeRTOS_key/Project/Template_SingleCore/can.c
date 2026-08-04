@@ -472,10 +472,22 @@ ErrStatus can_upload_env(void)
     system_state_input_t input;
     int32_t temp_c;
     uint32_t pressure_pa;
+    uint8_t zi;
+    uint8_t has_value = 0U;
 
     system_state_get_input(&input);
 
-    temp_c = input.max_temperature_tenths;
+    /* 4个分区中取有效温度的最大值上报，与切换前“取4路最高温”的上报语义保持一致。 */
+    temp_c = 0;
+    for(zi = 0U; zi < 4U; zi++) {
+        if(input.zone_temp_valid[zi] == 0U) {
+            continue;
+        }
+        if((has_value == 0U) || (input.zone_temperature_tenths[zi] > temp_c)) {
+            temp_c = input.zone_temperature_tenths[zi];
+        }
+        has_value = 1U;
+    }
     if(temp_c < 0) {
         temp_c = -temp_c;
     }
