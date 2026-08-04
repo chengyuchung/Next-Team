@@ -53,6 +53,7 @@
 #include "key.h"
 #include "power_manager.h"
 #include "system_state.h"
+#include "fault_manager.h"
 
 /* ---- task priorities (configMAX_PRIORITIES == 8) ---------------------- */
 #define INIT_TASK_PRIO       ( tskIDLE_PRIORITY + 1 )
@@ -69,6 +70,11 @@
 
 /* ---- application timing ----------------------------------------------- */
 #define APP_TASK_PERIOD_MS   ( 20U )
+
+/* 运行时可配置参数定义（通过 CAN 0x20 配置类命令动态修改） */
+uint32_t g_app_task_period_ms         = APP_TASK_PERIOD_MS;
+uint32_t g_guard_sleep_interval_ms    = 15U * 1000U;
+uint32_t g_guard_handling_budget_ms   = 30U * 1000U;
 
 /* ---- guard (低功耗巡检) mode timing ------------------------------------
  * KEY_4 切换进入/退出 guard 巡检模式：
@@ -130,6 +136,9 @@ extern volatile uint8_t g_key4_event;                  /* key.c */
 /* ---- module-local state ----------------------------------------------- */
 static uint8_t s_ignition_on = 0U;
 static uint8_t s_ignition_locked = 0U;   /* 1 = DANGER 状态强制锁定，禁止点火 */
+/* 手动/维护模式：1 = 状态机不再接管执行器，只听 CAN 直控命令。
+ * 由 0x0C/0x0D 显式切换；DANGER 状态会强制清零并夺回控制权。 */
+static volatile uint8_t s_manual_mode = 0U;
 static TaskHandle_t s_app_task_handle = NULL;
 /* note: not static, ISRs in gd32a7xx_it.c need to read this to know
  * whether an external event (CAN RX) should also wake guard_task.
@@ -368,34 +377,46 @@ static void apply_state_to_actuators(void)
     system_state_status_t status;
     system_state_get_status(&status);
 
-    pwm_set_enable(PWM_FAN, status.fan_enable);
-    pwm_set_duty_percent(PWM_FAN, status.fan_duty_percent);
-    pwm_set_enable(PWM_PUMP, status.pump_enable);
-    pwm_set_duty_percent(PWM_PUMP, status.pump_duty_percent);
+    /* 手动模式安全兜底：一旦系统进入 DANGER，状态机强制夺回控制权，
+     * 自动退出手动模式并主动上报事件帧，随后按下方正常逻辑降温/切点火。 */
+    if((s_manual_mode != 0U) && (status.state == SYSTEM_STATE_DANGER)) {
+        s_manual_mode = 0U;
+        (void)can_send_ack(CAN_CAT_EVENT, CAN_EVT_MANUAL_EXIT_DANGER, CAN_ACK_OK);
+    }
 
-    /* 4个制冷片独立控制 */
-    actor_set_channel(GPIO_CH_COOLER1, status.cooler_enable[0]);
-    actor_set_channel(GPIO_CH_COOLER2, status.cooler_enable[1]);
-    actor_set_channel(GPIO_CH_COOLER3, status.cooler_enable[2]);
-    actor_set_channel(GPIO_CH_COOLER4, status.cooler_enable[3]);
+    /* 手动/维护模式下不覆盖执行器（风扇/水泵/制冷/加热/蜂鸣/泄压阀），
+     * 完全交给 CAN 直控命令；仅保留下方点火安全逻辑与状态指示灯。 */
+    if(s_manual_mode == 0U) {
+        pwm_set_enable(PWM_FAN, status.fan_enable);
+        pwm_set_duty_percent(PWM_FAN, status.fan_duty_percent);
+        pwm_set_enable(PWM_PUMP, status.pump_enable);
+        pwm_set_duty_percent(PWM_PUMP, status.pump_duty_percent);
 
-    /* 4个PTC加热片独立控制 */
-    actor_set_channel(GPIO_CH_HEATER1, status.heater_enable[0]);
-    actor_set_channel(GPIO_CH_HEATER2, status.heater_enable[1]);
-    actor_set_channel(GPIO_CH_HEATER3, status.heater_enable[2]);
-    actor_set_channel(GPIO_CH_HEATER4, status.heater_enable[3]);
+        /* 4个制冷片独立控制 */
+        actor_set_channel(GPIO_CH_COOLER1, status.cooler_enable[0]);
+        actor_set_channel(GPIO_CH_COOLER2, status.cooler_enable[1]);
+        actor_set_channel(GPIO_CH_COOLER3, status.cooler_enable[2]);
+        actor_set_channel(GPIO_CH_COOLER4, status.cooler_enable[3]);
 
-    actor_set_channel(GPIO_CH_BUZZER, status.buzzer_enable);
-    actor_set_channel(GPIO_CH_GATE,   status.gate_enable);
+        /* 4个PTC加热片独立控制 */
+        actor_set_channel(GPIO_CH_HEATER1, status.heater_enable[0]);
+        actor_set_channel(GPIO_CH_HEATER2, status.heater_enable[1]);
+        actor_set_channel(GPIO_CH_HEATER3, status.heater_enable[2]);
+        actor_set_channel(GPIO_CH_HEATER4, status.heater_enable[3]);
+
+        actor_set_channel(GPIO_CH_BUZZER, status.buzzer_enable);
+        actor_set_channel(GPIO_CH_GATE,   status.gate_enable);
+    }
 
     /* DANGER 状态下强制切断点火（PF0 拉低），并锁定 ignition_task
-     * 使其忽略此时的 KEY_3 切换请求；其余状态解锁，恢复按键正常控制。 */
+     * 使其忽略此时的 KEY_3 切换请求；其余状态解锁，恢复按键正常控制。
+     * 此逻辑在任何模式（含手动模式）下都执行，作为点火安全边界。 */
     s_ignition_locked = (status.ignition_allowed == 0U) ? 1U : 0U;
     if(s_ignition_locked != 0U) {
         ignition_set(0U);
     }
 
-    /* 系统状态LED指示灯控制（互斥点亮） */
+    /* 系统状态LED指示灯控制（互斥点亮，始终反映状态机状态） */
     actor_set_channel(GPIO_CH_LED_WHITE,  (status.state == SYSTEM_STATE_LOW_TEMP) ? 1U : 0U);
     actor_set_channel(GPIO_CH_LED_GREEN,  (status.state == SYSTEM_STATE_NORMAL) ? 1U : 0U);
     actor_set_channel(GPIO_CH_LED_YELLOW, (status.state == SYSTEM_STATE_HIGH_TEMP) ? 1U : 0U);
@@ -424,6 +445,7 @@ static void app_task(void *pvParameters)
             g_system_state_changed_flag = 0U;
             (void)can_upload_system_state();
             (void)can_upload_env();
+            (void)can_upload_temp();
         }
 
         can_process_pending_uploads();
@@ -432,7 +454,7 @@ static void app_task(void *pvParameters)
         watchdog_feed();
 #endif
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(APP_TASK_PERIOD_MS));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(g_app_task_period_ms));
     }
 }
 /* ============================================================
@@ -534,7 +556,7 @@ static void guard_task(void *pvParameters)
         while(s_guard_mode_active != 0U) {
             /* long low-power sleep between patrols; tickless idle lets
              * the core WFI here instead of ticking every 1ms */
-            if(xSemaphoreTake(guard_key1_sem, pdMS_TO_TICKS(GUARD_SLEEP_INTERVAL_MS)) == pdTRUE) {
+            if(xSemaphoreTake(guard_key1_sem, pdMS_TO_TICKS(g_guard_sleep_interval_ms)) == pdTRUE) {
                 break; /* KEY_4 pressed again: exit guard mode */
             }
 
@@ -560,6 +582,7 @@ static void guard_task(void *pvParameters)
                         g_system_state_changed_flag = 0U;
                         (void)can_upload_system_state();
                         (void)can_upload_env();
+                        (void)can_upload_temp();
                     }
                     can_process_pending_uploads();
 
@@ -579,7 +602,7 @@ static void guard_task(void *pvParameters)
                         if(in_handling == 0U) {
                             in_handling      = 1U;
                             handling_deadline = xTaskGetTickCount()
-                                              + pdMS_TO_TICKS(GUARD_HANDLING_BUDGET_MS);
+                                              + pdMS_TO_TICKS(g_guard_handling_budget_ms);
                         }
                     } else {
                         in_handling = 0U;
@@ -603,6 +626,7 @@ static void guard_task(void *pvParameters)
                         g_system_state_changed_flag = 0U;
                         (void)can_upload_system_state();
                         (void)can_upload_env();
+                        (void)can_upload_temp();
                     }
                     can_process_pending_uploads();
 
@@ -658,8 +682,207 @@ static void ignition_task(void *pvParameters)
 }
 
 /* ============================================================
+ *  can_handle_control : 执行控制类命令（请求帧 Byte0=0x10）。
+ *    在 can_rx_task 上下文调用，返回 ACK 结果码 (CAN_ACK_*)。
+ *    0x00~0x05 已实现；0x06~0x0B 属维护模式直控，尚未实现，返回非法。
+ *    电源开关不直接调用 guard_enter/exit（避免与 guard_task 抢占），
+ *    而是按当前模式决定是否给 guard_key1_sem 触发一次状态切换。
+ * ============================================================ */
+static uint8_t can_handle_control(uint8_t msg_id, const uint8_t *param)
+{
+    switch(msg_id) {
+    case CAN_CTL_POWER_ON:
+        /* 仅当处于 guard 模式时才触发退出，回到正常模式 */
+        if(s_guard_mode_active != 0U) {
+            (void)xSemaphoreGive(guard_key1_sem);
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CTL_SLEEP:
+        /* 仅当处于正常模式时才触发进入 guard */
+        if(s_guard_mode_active == 0U) {
+            (void)xSemaphoreGive(guard_key1_sem);
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CTL_IGNITE:
+        /* DANGER 锁定时禁止打火 */
+        if(s_ignition_locked != 0U) {
+            return CAN_ACK_REJECTED;
+        }
+        ignition_set(1U);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_EXTINGUISH:
+        ignition_set(0U);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_RESET:
+        {
+            /* Byte2=高字节, Byte3=低字节，校验防误触 */
+            uint16_t magic = (uint16_t)(((uint16_t)param[0] << 8) | param[1]);
+            if(magic != CAN_CTL_RESET_MAGIC) {
+                return CAN_ACK_CHECK_FAIL;
+            }
+            /* 先回执，稍作延时确保帧发出，再复位 */
+            (void)can_send_ack(CAN_CAT_CONTROL, CAN_CTL_RESET, CAN_ACK_OK);
+            vTaskDelay(pdMS_TO_TICKS(50U));
+            NVIC_SystemReset();
+        }
+        return CAN_ACK_OK; /* 正常不会执行到 */
+
+    case CAN_CTL_CLEAR_FAULT:
+        fault_manager_reset();
+        return CAN_ACK_OK;
+
+    case CAN_CTL_MANUAL_ENTER:
+        s_manual_mode = 1U;
+        return CAN_ACK_OK;
+
+    case CAN_CTL_MANUAL_EXIT:
+        s_manual_mode = 0U;
+        return CAN_ACK_OK;
+
+    /* --- 维护模式直控：仅手动模式下生效，否则拒绝 --- */
+    case CAN_CTL_BUZZER_MUTE:
+        if(s_manual_mode == 0U) { return CAN_ACK_NOT_MANUAL; }
+        /* Byte2=1开/0关；静音即关闭蜂鸣器 */
+        actor_set_channel(GPIO_CH_BUZZER, (param[0] != 0U) ? 1U : 0U);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_COOLER:
+        if(s_manual_mode == 0U) { return CAN_ACK_NOT_MANUAL; }
+        if(param[0] > 3U) { return CAN_ACK_ILLEGAL; }
+        actor_set_channel((actor_channel_t)(GPIO_CH_COOLER1 + param[0]),
+                          (param[1] != 0U) ? 1U : 0U);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_HEATER:
+        if(s_manual_mode == 0U) { return CAN_ACK_NOT_MANUAL; }
+        if(param[0] > 3U) { return CAN_ACK_ILLEGAL; }
+        actor_set_channel((actor_channel_t)(GPIO_CH_HEATER1 + param[0]),
+                          (param[1] != 0U) ? 1U : 0U);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_FAN:
+        if(s_manual_mode == 0U) { return CAN_ACK_NOT_MANUAL; }
+        if(param[1] > 100U) { return CAN_ACK_ILLEGAL; }
+        pwm_set_enable(PWM_FAN, (param[0] != 0U) ? 1U : 0U);
+        pwm_set_duty_percent(PWM_FAN, param[1]);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_PUMP:
+        if(s_manual_mode == 0U) { return CAN_ACK_NOT_MANUAL; }
+        if(param[1] > 100U) { return CAN_ACK_ILLEGAL; }
+        pwm_set_enable(PWM_PUMP, (param[0] != 0U) ? 1U : 0U);
+        pwm_set_duty_percent(PWM_PUMP, param[1]);
+        return CAN_ACK_OK;
+
+    case CAN_CTL_GATE:
+        if(s_manual_mode == 0U) { return CAN_ACK_NOT_MANUAL; }
+        actor_set_channel(GPIO_CH_GATE, (param[0] != 0U) ? 1U : 0U);
+        return CAN_ACK_OK;
+
+    default:
+        return CAN_ACK_ILLEGAL;
+    }
+}
+
+/* ============================================================
+ *  can_handle_config : 处理配置类消息 (0x20)，动态修改运行参数
+ *    param[0~5] 对应 Byte2~7。
+ *    返回 ACK 结果码 (CAN_ACK_*)。
+ * ============================================================ */
+static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
+{
+    switch(msg_id) {
+    case CAN_CFG_HIGH_TEMP_THRESHOLD:
+        {
+            uint8_t integer = param[0];
+            uint8_t decimal = param[1];
+            if((integer > 100U) || (decimal > 9U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_high_temp_threshold_tenths = (uint16_t)(integer * 10U + decimal);
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_DANGER_TEMP_THRESHOLD:
+        {
+            uint8_t integer = param[0];
+            uint8_t decimal = param[1];
+            if((integer > 100U) || (decimal > 9U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_danger_temp_threshold_tenths = (uint16_t)(integer * 10U + decimal);
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_LOW_TEMP_THRESHOLD:
+        {
+            uint8_t integer = param[0];
+            uint8_t decimal = param[1];
+            if((integer > 100U) || (decimal > 9U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_low_temp_threshold_tenths = (uint16_t)(integer * 10U + decimal);
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_FALLBACK_CONFIRM_COUNT:
+        {
+            uint8_t count = param[0];
+            if((count == 0U) || (count > 10U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_fallback_confirm_count = count;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_GUARD_SLEEP_INTERVAL:
+        {
+            uint8_t tens = param[0];
+            uint8_t ones = param[1];
+            uint32_t seconds = (uint32_t)(tens * 10U + ones);
+            if((seconds < 5U) || (seconds > 255U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_guard_sleep_interval_ms = seconds * 1000U;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_GUARD_HANDLING_BUDGET:
+        {
+            uint8_t tens = param[0];
+            uint8_t ones = param[1];
+            uint32_t seconds = (uint32_t)(tens * 10U + ones);
+            if((seconds < 5U) || (seconds > 255U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_guard_handling_budget_ms = seconds * 1000U;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_APP_TASK_PERIOD:
+        {
+            uint8_t period_ms = param[0];
+            if((period_ms < 10U) || (period_ms > 100U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_app_task_period_ms = (uint32_t)period_ms;
+        }
+        return CAN_ACK_OK;
+
+    default:
+        return CAN_ACK_ILLEGAL;
+    }
+}
+
+/* ============================================================
  *  can_rx_task : blocks on can4_rx_queue filled by DTM_CAN4 ISR,
- *                parses command frames off the ISR context.
+ *                parses request frames (0x188) off the ISR context.
+ *    Byte0=类别, Byte1=消息号, Byte2~7=配置参数。
+ *    查询类只置位上报标志（响应走数据帧）；控制/配置类回 0x186 ACK。
  * ============================================================ */
 static void can_rx_task(void *pvParameters)
 {
@@ -668,13 +891,42 @@ static void can_rx_task(void *pvParameters)
 
     for( ;; ) {
         if(xQueueReceive(can4_rx_queue, &rx_msg, portMAX_DELAY) == pdTRUE) {
-            if((rx_msg.xtd == CAN_FF_STANDARD) && (rx_msg.id == CAN_ID_CMD)) {
-                uint8_t cmd = 0U, a1 = 0U, a2 = 0U, a3 = 0U;
-                if(rx_msg.data_bytes > 0U) { cmd = rx_msg.data[0]; }
-                if(rx_msg.data_bytes > 1U) { a1  = rx_msg.data[1]; }
-                if(rx_msg.data_bytes > 2U) { a2  = rx_msg.data[2]; }
-                if(rx_msg.data_bytes > 3U) { a3  = rx_msg.data[3]; }
-                (void)can_handle_cmd(cmd, a1, a2, a3);
+            uint8_t category;
+            uint8_t msg_id;
+            uint8_t param[6] = {0};
+            uint8_t i;
+
+            if((rx_msg.xtd != CAN_FF_STANDARD) || (rx_msg.id != CAN_ID_CMD)) {
+                continue;
+            }
+
+            category = (rx_msg.data_bytes > 0U) ? rx_msg.data[0] : 0xFFU;
+            msg_id   = (rx_msg.data_bytes > 1U) ? rx_msg.data[1] : 0U;
+            for(i = 0U; (i < 6U) && ((uint16_t)(i + 2U) < rx_msg.data_bytes); i++) {
+                param[i] = rx_msg.data[i + 2U];
+            }
+
+            switch(category) {
+            case CAN_CAT_QUERY:
+                (void)can_handle_query(msg_id);
+                break;
+
+            case CAN_CAT_CONTROL:
+                {
+                    uint8_t result = can_handle_control(msg_id, param);
+                    (void)can_send_ack(CAN_CAT_CONTROL, msg_id, result);
+                }
+                break;
+
+            case CAN_CAT_CONFIG:
+                {
+                    uint8_t result = can_handle_config(msg_id, param);
+                    (void)can_send_ack(CAN_CAT_CONFIG, msg_id, result);
+                }
+                break;
+
+            default:
+                break;
             }
         }
     }

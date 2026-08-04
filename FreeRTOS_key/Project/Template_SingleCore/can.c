@@ -2,13 +2,13 @@
 #include "main.h"
 #include "fault_manager.h"
 #include "system_state.h"
+#include "temp_sensor.h"
 #include <string.h>
 
 /*
- * CAN 协议与底层说明
- * 1) 这里保留了项目原有的 CAN0/CAN2/CAN4/CAN5 底层初始化，避免删减后引发总线卡死。
- * 2) 当前上层协议主要围绕 CAN4 展开，使用 0x184 命令帧请求 0x180~0x183 的业务帧。
- * 3) 虚拟数据模式由 CAN_APP_USE_REAL_DATA 控制，0=虚拟数据，1=真实业务数据。
+ * CAN 应用层实现
+ * 初始化 CAN 时钟与 CAN0/CAN2/CAN4/CAN5 的引脚及参数
+ * 数据帧走独立 ID：0x180~0x184 上报，0x188 接收请求，0x186 回 ACK
  */
 
 
@@ -22,55 +22,24 @@ static volatile uint8_t s_upload_env_flag = 0U;
 static volatile uint8_t s_upload_state_flag = 0U;
 static volatile uint8_t s_upload_system_state_flag = 0U;
 static volatile uint8_t s_upload_fault_flag = 0U;
+static volatile uint8_t s_upload_temp_flag = 0U;
 
 /*
- * 状态变化通知标志：
- *   由 system_state 模块置位；
- *   主循环主动消费，而不是依赖 CAN 接收中断。
+ * 系统状态变化标志
+ *   由 system_state 模块置位
+ *   用于触发状态变化时主动上报 CAN 数据
  */
 volatile uint8_t g_system_state_changed_flag = 0U;
 
 /*
- * 真实运行缓存：按帧拆分，分别保存环境/状态/警报/故障数据。
- * 上层模块可以只更新自己关心的那一帧数据，互不影响。
+ * CAN 上报缓存：环境数据/执行状态/系统状态/故障信息/温度数据
+ * 由应用层写入，发送函数从这里读取并组帧
  */
 static can_env_data_t s_env = {0};
 static can_state_data_t s_state = {0};
 static can_system_state_data_t s_system_state_frame = {0};
 static can_fault_data_t s_fault = {0};
-
-/*
- * 虚拟数据集：同样按帧拆分，方便调试时单独修改某一帧的测试值。
- * 下面这 4 组数据就是 CAN4 联调时的默认测试源。
- */
-static const can_env_data_t s_demo_env = {
-    25U,
-    60U,
-    1013U,
-    0U
-};
-
-static const can_state_data_t s_demo_state = {
-    1U,
-    1U,
-    1U,
-    1U
-};
-
-static const can_system_state_data_t s_demo_system_state = {
-    1U,
-    {0U, 0U, 0U, 0U, 0U, 0U, 0U}
-};
-
-static const can_fault_data_t s_demo_fault = {
-    1U,
-    1U,
-    1U,
-    1U,
-    1U,
-    1U,
-    1U
-};
+static can_temp_data_t s_temp = {{0}};
 
 void can_gpio_config(void)
 {
@@ -296,15 +265,13 @@ void canfd_config(void)
 }
 
 /**
- * @brief  DTM CAN4 消息发送测试函数
- *
- * @note   该函数用于初始化并发送一个标准的CAN数据帧，以验证DTM CAN4模块的发送功能。
- *
+ * @brief  DTM CAN4 报文发送测试
+ * @note   构造一帧固定数据从 DTM CAN4 发送，用于验证 CAN 通道是否正常
  * @param  None
  *
  * @retval ErrStatus
- *         - SUCCESS: 消息成功准备并加入发送队列
- *         - ERROR:   获取发送邮箱失败，消息未发送
+ *         - SUCCESS: 报文已加入发送队列
+ *         - ERROR:   无可用发送邮箱
  */
 ErrStatus dtm_can4_message_transmit_test(void)
 {
@@ -312,7 +279,7 @@ ErrStatus dtm_can4_message_transmit_test(void)
     ErrStatus ret = SUCCESS;
     uint16_t i;
 
-    /* 初始化CAN发送消息结构体参数 */
+    /* 初始化 CAN 发送报文结构 */
     can_struct_para_init(CAN_TX_MESSAGE_STRUCT, &tx_message);
     tx_message.id = CAN_ID_CMD;
     tx_message.rtr = CAN_FT_DATA;
@@ -324,17 +291,17 @@ ErrStatus dtm_can4_message_transmit_test(void)
     tx_message.ev_fifo_control = CAN_TXEVENT_FIFO_DISABLE;
     tx_message.data_bytes = 8;
 
-    /* 填充8字节的数据载荷，数据内容为1到8 */
+    /* 填充 8 字节测试数据 */
     for(i = 0; i < 8; i++) {
         tx_message.data[i] = i + 1;
     }
 
-    /* 准备CAN消息传输，获取可用的发送邮箱 */
+    /* 申请发送邮箱并准备 CAN 报文 */
     transmit_mailbox = can_message_transmit_prepare(DTM_CAN4, &tx_message);
     if(transmit_mailbox == 0xFF) {
         ret = ERROR;
     } else {
-        /* 将消息添加到指定的发送邮箱以启动传输 */
+        /* 将报文加入发送队列 */
         can_message_transmit_add(DTM_CAN4, transmit_mailbox);
     }
     return ret;
@@ -425,129 +392,77 @@ void can_set_fault_data(const can_fault_data_t *data)
     }
 }
 
-
-uint8_t can_crc8(const uint8_t *data, uint8_t len)
+void can_set_temp_data(const can_temp_data_t *data)
 {
-    uint8_t crc = 0x00U;
-    uint8_t i;
-    uint8_t j;
-
-    if(data == NULL) {
-        return 0U;
+    if(data != NULL) {
+        s_temp = *data;
     }
-
-    for(i = 0U; i < len; i++) {
-        crc ^= data[i];
-        for(j = 0U; j < 8U; j++) {
-            if((crc & 0x80U) != 0U) {
-                crc = (uint8_t)((crc << 1U) ^ 0x07U);
-            } else {
-                crc <<= 1U;
-            }
-        }
-    }
-
-    return crc;
 }
 
-ErrStatus can_send_env(uint16_t temp_int, uint16_t temp_frac, uint16_t press_int, uint16_t press_frac, uint8_t gas_leak)
+
+ErrStatus can_send_env(int16_t max_temp_tenths, int16_t pressure_kpa, uint8_t press_alarm, uint8_t gas_leak)
 {
     uint8_t data[8] = {0};
-    data[0] = (uint8_t)(temp_int >> 8);
-    data[1] = (uint8_t)(temp_int & 0xFFU);
-    data[2] = (uint8_t)(temp_frac & 0xFFU);
-    data[3] = (uint8_t)(press_int >> 8);
-    data[4] = (uint8_t)(press_int & 0xFFU);
-    data[5] = (uint8_t)(press_frac & 0xFFU);
-    data[6] = gas_leak;
-    data[7] = can_crc8(data, 7U);
+
+    /* Byte[0,1]: 最高温度 int16_t，高字节在前（0.1C 单位） */
+    data[0] = (uint8_t)((uint16_t)max_temp_tenths >> 8);
+    data[1] = (uint8_t)((uint16_t)max_temp_tenths & 0xFFU);
+
+    /* Byte[2,3]: 压力 int16_t，单位 kPa */
+    data[2] = (uint8_t)((uint16_t)pressure_kpa >> 8);
+    data[3] = (uint8_t)((uint16_t)pressure_kpa & 0xFFU);
+
+    /* Byte[4]: 压力报警标志 */
+    data[4] = press_alarm;
+
+    /* Byte[5]: 气体泄漏标志 */
+    data[5] = gas_leak;
+
+    /* Byte[6,7]: 预留（未使用 CRC 校验） */
     return can_send_std_frame(DTM_CAN4, CAN_ID_ENV, data, 8U);
 }
 
 ErrStatus can_upload_env(void)
 {
-#if (CAN_APP_USE_REAL_DATA == 0U)
-    return can_send_env(s_demo_env.temp_int, s_demo_env.temp_frac, s_demo_env.press_int, s_demo_env.press_frac, s_demo_env.gas_leak);
-#else
     system_state_input_t input;
-    int32_t temp_c;
-    uint32_t pressure_pa;
-    uint8_t zi;
-    uint8_t has_value = 0U;
+    temp_result_t temp_result;
 
     system_state_get_input(&input);
+    temp_get_last(&temp_result);
 
-    /* 4个分区中取有效温度的最大值上报，与切换前“取4路最高温”的上报语义保持一致。 */
-    temp_c = 0;
-    for(zi = 0U; zi < 4U; zi++) {
-        if(input.zone_temp_valid[zi] == 0U) {
-            continue;
-        }
-        if((has_value == 0U) || (input.zone_temperature_tenths[zi] > temp_c)) {
-            temp_c = input.zone_temperature_tenths[zi];
-        }
-        has_value = 1U;
-    }
-    if(temp_c < 0) {
-        temp_c = -temp_c;
-    }
-    s_env.temp_int = (uint16_t)(temp_c / 10);
-    s_env.temp_frac = (uint16_t)(temp_c % 10);
+    /* 压力单位换算为 kPa（除以 1000） */
+    int16_t pressure_kpa = (int16_t)((input.pressure_pa < 0) ? 0 : ((uint32_t)input.pressure_pa / 1000U));
 
-    pressure_pa = (input.pressure_pa < 0) ? 0U : (uint32_t)input.pressure_pa;
-    s_env.press_int = (uint16_t)(pressure_pa / 1000U);
-    s_env.press_frac = (uint16_t)((pressure_pa % 1000U) / 10U);
-    s_env.gas_leak = input.gas_alarm;
-
-    return can_send_env(s_env.temp_int, s_env.temp_frac, s_env.press_int, s_env.press_frac, s_env.gas_leak);
-#endif
+    /* 温度取自 temp_sensor 的最高温度；压力报警 = pressure_alarm，气体报警 = gas_alarm */
+    return can_send_env(temp_result.maximum_temperature, pressure_kpa,
+                       input.pressure_alarm, input.gas_alarm);
 }
 
 ErrStatus can_upload_state(void)
 {
-#if (CAN_APP_USE_REAL_DATA == 0U)
-    uint8_t fan_duty = s_demo_state.fan_duty;
-    uint8_t pump_duty = s_demo_state.pump_duty;
-    uint8_t cooler_on = s_demo_state.cooler_on;
-    uint8_t gate_on = s_demo_state.gate_on;
-#else
     system_state_status_t status;
     system_state_get_status(&status);
     uint8_t fan_duty = status.fan_duty_percent;
     uint8_t pump_duty = status.pump_duty_percent;
-    /* 制冷片状态：4路中任意一路开启则cooler_on=1 */
+    /* 4 路制冷中任一路开启，则 cooler_on=1 */
     uint8_t cooler_on = (uint8_t)(status.cooler_enable[0] | status.cooler_enable[1] |
                                    status.cooler_enable[2] | status.cooler_enable[3]);
     uint8_t gate_on = status.gate_enable;
-#endif
     return can_send_state(fan_duty, pump_duty, cooler_on, gate_on);
 }
 
 ErrStatus can_upload_system_state(void)
 {
-#if (CAN_APP_USE_REAL_DATA == 0U)
-    uint8_t level = s_demo_system_state.level;
-#else
     system_state_status_t status;
     system_state_get_status(&status);
-    uint8_t level = (status.state == SYSTEM_STATE_NORMAL) ? 1U :
-                    (status.state == SYSTEM_STATE_LOW_TEMP) ? 2U :
+    uint8_t level = (status.state == SYSTEM_STATE_NORMAL)   ? 1U :
+                    (status.state == SYSTEM_STATE_LOW_TEMP)  ? 2U :
                     (status.state == SYSTEM_STATE_HIGH_TEMP) ? 3U : 4U;
-#endif
     return can_send_system_state(level);
 }
 
 ErrStatus can_upload_fault(void)
 {
-#if (CAN_APP_USE_REAL_DATA == 0U)
-    uint8_t fault_fan = s_demo_fault.fan;
-    uint8_t fault_pump = s_demo_fault.pump;
-    uint8_t fault_cool = s_demo_fault.cool;
-    uint8_t fault_gate = s_demo_fault.gate;
-    uint8_t fault_temp_sensor = s_demo_fault.temp_sensor;
-    uint8_t fault_press_sensor = s_demo_fault.press_sensor;
-    uint8_t fault_gas_sensor = s_demo_fault.gas_sensor;
-#else
     system_state_input_t input;
     fault_manager_status_t fault_status;
     uint8_t fault_heater = 0U;
@@ -561,8 +476,21 @@ ErrStatus can_upload_fault(void)
     fault_temp_sensor = (input.temperature_valid != 0U) ? 0U : 1U;
     fault_press_sensor = (input.pressure_valid != 0U) ? 0U : 1U;
     fault_gas_sensor = (input.gas_valid != 0U) ? 0U : 1U;
-#endif
-    return can_send_fault(fault_heater, fault_cooler, 0U, 0U, fault_temp_sensor, fault_press_sensor, fault_gas_sensor);
+    return can_send_fault(fault_heater, fault_cooler, 0U, 0U,
+                          fault_temp_sensor, fault_press_sensor, fault_gas_sensor);
+}
+
+ErrStatus can_upload_temp(void)
+{
+    system_state_input_t input;
+    system_state_get_input(&input);
+
+    int16_t temp_ch0 = input.zone_temp_valid[0] ? input.zone_temperature_tenths[0] : 0;
+    int16_t temp_ch1 = input.zone_temp_valid[1] ? input.zone_temperature_tenths[1] : 0;
+    int16_t temp_ch2 = input.zone_temp_valid[2] ? input.zone_temperature_tenths[2] : 0;
+    int16_t temp_ch3 = input.zone_temp_valid[3] ? input.zone_temperature_tenths[3] : 0;
+
+    return can_send_temp(temp_ch0, temp_ch1, temp_ch2, temp_ch3);
 }
 
 ErrStatus can_send_state(uint8_t fan_duty, uint8_t pump_duty, uint8_t cooler_on, uint8_t gate_on)
@@ -573,7 +501,6 @@ ErrStatus can_send_state(uint8_t fan_duty, uint8_t pump_duty, uint8_t cooler_on,
     data[1] = pump_duty;
     data[2] = cooler_on;
     data[3] = gate_on;
-    data[7] = can_crc8(data, 7U);
     return can_send_std_frame(DTM_CAN4, CAN_ID_STA, data, 8U);
 }
 
@@ -581,7 +508,6 @@ ErrStatus can_send_system_state(uint8_t level)
 {
     uint8_t data[8] = {0};
     data[0] = level;
-    data[7] = can_crc8(data, 7U);
     return can_send_std_frame(DTM_CAN4, CAN_ID_SYS_STATE, data, 8U);
 }
 
@@ -595,32 +521,56 @@ ErrStatus can_send_fault(uint8_t fault_fan, uint8_t fault_pump, uint8_t fault_co
     data[4] = fault_temp_sensor;
     data[5] = fault_press_sensor;
     data[6] = fault_gas_sensor;
-    data[7] = can_crc8(data, 7U);
     return can_send_std_frame(DTM_CAN4, CAN_ID_FLT, data, 8U);
 }
 
-ErrStatus can_handle_cmd(uint8_t cmd, uint8_t arg1, uint8_t arg2, uint8_t arg3)
+/*
+ * can_send_temp - 上报 4 路温度数据 (ID: 0x184)
+ *   每路 int16_t，高字节在前，单位 0.1C
+ *   不含 CRC 校验
+ */
+ErrStatus can_send_temp(int16_t temp_ch0, int16_t temp_ch1, int16_t temp_ch2, int16_t temp_ch3)
 {
-    switch(cmd) {
-    case CAN_CMD_ENV:
+    uint8_t data[8] = {0};
+
+    data[0] = (uint8_t)((uint16_t)temp_ch0 >> 8);
+    data[1] = (uint8_t)((uint16_t)temp_ch0 & 0xFFU);
+    data[2] = (uint8_t)((uint16_t)temp_ch1 >> 8);
+    data[3] = (uint8_t)((uint16_t)temp_ch1 & 0xFFU);
+    data[4] = (uint8_t)((uint16_t)temp_ch2 >> 8);
+    data[5] = (uint8_t)((uint16_t)temp_ch2 & 0xFFU);
+    data[6] = (uint8_t)((uint16_t)temp_ch3 >> 8);
+    data[7] = (uint8_t)((uint16_t)temp_ch3 & 0xFFU);
+
+    return can_send_std_frame(DTM_CAN4, CAN_ID_TEMP, data, 8U);
+}
+
+/*
+ * can_handle_query - 处理查询类请求（Byte0=0x00）
+ *   仅置位对应上报标志，实际组帧在主循环 can_process_pending_uploads() 完成。
+ *   查询响应走各自数据帧 ID（0x180~0x184），不占用 0x186。
+ */
+ErrStatus can_handle_query(uint8_t msg_id)
+{
+    switch(msg_id) {
+    case CAN_QRY_ENV:
         s_upload_env_flag = 1U;
         break;
-    case CAN_CMD_STA:
+    case CAN_QRY_STA:
         s_upload_state_flag = 1U;
         break;
-    case CAN_CMD_ALM:
+    case CAN_QRY_SYS:
         s_upload_system_state_flag = 1U;
         break;
-    case CAN_CMD_FLT:
+    case CAN_QRY_FLT:
         s_upload_fault_flag = 1U;
         break;
-    default:
+    case CAN_QRY_TEMP:
+        s_upload_temp_flag = 1U;
         break;
+    default:
+        return ERROR;
     }
-
-    (void)arg1;
-    (void)arg2;
-    (void)arg3;
     return SUCCESS;
 }
 
@@ -645,58 +595,33 @@ void can_process_pending_uploads(void)
         s_upload_fault_flag = 0U;
         (void)can_upload_fault();
     }
-}
 
-ErrStatus can_upload_all(void)
-{
-    ErrStatus ret = SUCCESS;
-    ret |= can_upload_env();
-    ret |= can_upload_state();
-    ret |= can_upload_system_state();
-    ret |= can_upload_fault();
-    return ret;
-}
-
-ErrStatus can_upload_demo(void)
-{
-#if (CAN_APP_USE_REAL_DATA == 0U)
-    can_set_env_data(&s_demo_env);
-    can_set_state_data(&s_demo_state);
-    can_set_state_frame_data(&s_demo_system_state);
-    can_set_fault_data(&s_demo_fault);
-#endif
-    return can_upload_all();
-}
-
-static uint8_t can_cmd_to_id(uint8_t cmd)
-{
-    switch(cmd) {
-    case CAN_CMD_ENV:
-        return (uint8_t)CAN_ID_ENV;
-    case CAN_CMD_STA:
-        return (uint8_t)CAN_ID_STA;
-    case CAN_CMD_ALM:
-        return (uint8_t)CAN_ID_SYS_STATE;
-    case CAN_CMD_FLT:
-        return (uint8_t)CAN_ID_FLT;
-    default:
-        return 0U;
+    if(s_upload_temp_flag != 0U) {
+        s_upload_temp_flag = 0U;
+        (void)can_upload_temp();
     }
 }
 
-ErrStatus can_send_cmd_reply(uint8_t cmd, uint8_t a1, uint8_t a2, uint8_t a3)
+/*
+ * can_send_ack - 发送控制/配置类执行结果回执 (ID: 0x186)
+ *   Byte0 回显类别，Byte1 回显消息号，Byte2 结果码 (CAN_ACK_*)，
+ *   Byte3 当前点火状态，Byte4 当前系统状态等级，其余预留。
+ */
+ErrStatus can_send_ack(uint8_t category, uint8_t msg_id, uint8_t result)
 {
     uint8_t data[8] = {0};
-    uint8_t id = can_cmd_to_id(cmd);
-    if(id == 0U) {
-        return ERROR;
+    data[0] = category;
+    data[1] = msg_id;
+    data[2] = result;
+    data[3] = ignition_get();
+    {
+        system_state_status_t status;
+        system_state_get_status(&status);
+        data[4] = (status.state == SYSTEM_STATE_NORMAL)   ? 1U :
+                  (status.state == SYSTEM_STATE_LOW_TEMP)  ? 2U :
+                  (status.state == SYSTEM_STATE_HIGH_TEMP) ? 3U : 4U;
     }
-    data[0] = cmd;
-    data[1] = a1;
-    data[2] = a2;
-    data[3] = a3;
-    data[7] = can_crc8(data, 7U);
-    return can_send_std_frame(DTM_CAN4, id, data, 8U);
+    return can_send_std_frame(DTM_CAN4, CAN_ID_ACK, data, 8U);
 }
 
 

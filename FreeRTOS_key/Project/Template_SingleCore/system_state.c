@@ -3,6 +3,14 @@
 #include <string.h>
 
 /*
+ * 运行时可配置参数定义（通过 CAN 0x20 配置类命令动态修改）
+ */
+uint16_t g_low_temp_threshold_tenths    = SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C;
+uint16_t g_high_temp_threshold_tenths   = SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C;
+uint16_t g_danger_temp_threshold_tenths = SYSTEM_STATE_DEFAULT_DANGER_TEMP_C;
+uint8_t g_fallback_confirm_count        = SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT;
+
+/*
  * 外部状态变化标志
  *   由状态机在发生有效状态切换时置位，通常由主循环或上层任务轮询处理。
  *   它只表示“状态已经变化”，不直接代表故障、告警或安全锁定。
@@ -243,7 +251,7 @@ static uint8_t system_state_zone_has_low_temp(const system_state_input_t *input,
         return 0U;
     }
 
-    return (uint8_t)(input->zone_temperature_tenths[zone_idx] < (int16_t)SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C);
+    return (uint8_t)(input->zone_temperature_tenths[zone_idx] < (int16_t)g_low_temp_threshold_tenths);
 }
 
 /*
@@ -270,8 +278,8 @@ static uint8_t system_state_zone_has_high_temp(const system_state_input_t *input
     }
 
     zone_temp = input->zone_temperature_tenths[zone_idx];
-    return (uint8_t)((zone_temp >= (int16_t)SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C) &&
-                     (zone_temp < (int16_t)SYSTEM_STATE_DEFAULT_DANGER_TEMP_C));
+    return (uint8_t)((zone_temp >= (int16_t)g_high_temp_threshold_tenths) &&
+                     (zone_temp < (int16_t)g_danger_temp_threshold_tenths));
 }
 
 /*
@@ -295,7 +303,7 @@ static uint8_t system_state_zone_has_danger(const system_state_input_t *input, u
         return 0U;
     }
 
-    return (uint8_t)(input->zone_temperature_tenths[zone_idx] >= (int16_t)SYSTEM_STATE_DEFAULT_DANGER_TEMP_C);
+    return (uint8_t)(input->zone_temperature_tenths[zone_idx] >= (int16_t)g_danger_temp_threshold_tenths);
 }
 
 /*
@@ -317,11 +325,11 @@ static uint8_t system_state_handle_fall_confirm(uint8_t condition_met,
         return 0U;
     }
 
-    if(*counter < SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT) {
+    if(*counter < g_fallback_confirm_count) {
         (*counter)++;
     }
 
-    if(*counter >= SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT) {
+    if(*counter >= g_fallback_confirm_count) {
         *counter = clear_counter_value;
         return 1U;
     }
@@ -340,7 +348,7 @@ static uint8_t system_state_zone_can_fall_from_low_temp(const system_state_input
 
     if((input != NULL) && (input->zone_temp_valid[zone_idx] != 0U)) {
         condition_met = (uint8_t)(input->zone_temperature_tenths[zone_idx] >=
-                                   (int16_t)SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C);
+                                   (int16_t)g_low_temp_threshold_tenths);
     }
 
     return system_state_handle_fall_confirm(
@@ -359,7 +367,7 @@ static uint8_t system_state_zone_can_fall_from_high_temp(const system_state_inpu
 
     if((input != NULL) && (input->zone_temp_valid[zone_idx] != 0U) && (input->pressure_alarm == 0U)) {
         condition_met = (uint8_t)(input->zone_temperature_tenths[zone_idx] <
-                                   (int16_t)SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C);
+                                   (int16_t)g_high_temp_threshold_tenths);
     }
 
     return system_state_handle_fall_confirm(
@@ -378,7 +386,7 @@ static uint8_t system_state_zone_can_fall_from_danger(const system_state_input_t
 
     if((input != NULL) && (input->zone_temp_valid[zone_idx] != 0U) && (input->gas_alarm == 0U)) {
         condition_met = (uint8_t)(input->zone_temperature_tenths[zone_idx] <
-                                   (int16_t)SYSTEM_STATE_DEFAULT_DANGER_TEMP_C);
+                                   (int16_t)g_danger_temp_threshold_tenths);
     }
 
     return system_state_handle_fall_confirm(

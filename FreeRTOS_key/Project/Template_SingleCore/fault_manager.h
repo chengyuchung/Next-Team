@@ -2,7 +2,6 @@
 #define FAULT_MANAGER_H
 
 #include <stdint.h>
-#include "app_config.h"
 #include "adc_manager.h"
 
 #ifdef __cplusplus

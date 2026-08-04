@@ -2,7 +2,6 @@
 #define SYSTEM_STATE_H
 
 #include <stdint.h>
-#include "app_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,6 +69,15 @@ extern "C" {
  */
 #define SYSTEM_STATE_DEFAULT_SAMPLE_MS             1000U /* 统一采样周期 1s */
 #define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      2U    /* 回落确认次数，需连续满足条件才允许降级。 */
+
+/*
+ * 运行时可配置参数（通过 CAN 0x20 配置类命令动态修改）
+ *   初始化为默认值，可在运行时通过 CAN 命令修改
+ */
+extern uint16_t g_low_temp_threshold_tenths;    /* 低温阈值，单位 0.1°C */
+extern uint16_t g_high_temp_threshold_tenths;   /* 高温阈值，单位 0.1°C */
+extern uint16_t g_danger_temp_threshold_tenths; /* 危险阈值，单位 0.1°C */
+extern uint8_t g_fallback_confirm_count;        /* 回落确认次数 */
 
 /*
  * system_state_t
