@@ -1,0 +1,44 @@
+#ifndef APP_TASKS_H
+#define APP_TASKS_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * =============================================================================
+ * 模块名称 : app_tasks
+ * 文件功能 : FreeRTOS 应用层任务集中管理
+ *
+ * 模块定位
+ *   本模块把原先散落在 main.c 里的全部应用任务（初始化/主控/巡检/点火/CAN）
+ *   及其辅助函数集中到一起，让 main.c 只负责最小启动流程与板级外设初始化。
+ *
+ *   任务清单：
+ *     - init_task    : 一次性板级初始化 + 创建 IPC 与其余任务，随后自删除；
+ *     - app_task     : 正常运行模式下的周期控制循环（状态机 + CAN 上报）；
+ *     - guard_task   : 低功耗巡检模式（睡眠/巡检交替）；
+ *     - ignition_task: 响应 KEY_3 点火切换；
+ *     - can_rx_task  : 解析 CAN 请求帧（查询/控制/配置）。
+ *
+ *   IPC 对象（ignition_sem / guard_key1_sem / can4_rx_queue）与 guard 模式
+ *   标志 s_guard_mode_active 在本模块定义，由 gd32a7xx_it.c 中的 ISR 以
+ *   extern 方式引用。
+ * =============================================================================
+ */
+
+/*
+ * app_tasks_start
+ *   创建 init_task。应在 main() 里 vTaskStartScheduler() 之前调用。
+ *   init_task 会完成板级初始化、创建 IPC 与其余任务，然后进入 guard 模式
+ *   并删除自身。
+ */
+void app_tasks_start(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* APP_TASKS_H */

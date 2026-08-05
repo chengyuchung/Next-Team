@@ -395,6 +395,11 @@
               <FilePath>..\main.c</FilePath>
             </File>
             <File>
+              <FileName>app_tasks.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\app_tasks.c</FilePath>
+            </File>
+            <File>
               <FileName>systick.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\systick.c</FilePath>
