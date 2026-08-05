@@ -29,19 +29,19 @@
 #include "main.h"
 #include "app_tasks.h"
 
-#include "can.h"
+#include "can_app.h"
 #include "watchdog.h"
-#include "bmp280.h"
-#include "temp_sensor.h"
-#include "adc_manager.h"
-#include "mq9.h"
+#include "BSW/EcuAL/pressure_sensor.h"
+#include "BSW/EcuAL/temp_sensor.h"
+#include "MCAL/adc_manager.h"
+#include "BSW/EcuAL/gas_sensor.h"
 #include "motor_pwm_gd32.h"
 #include "relay_power.h"
-#include "actor.h"
+#include "MCAL/actor_hal.h"
 #include "key.h"
-#include "power_manager.h"
-#include "system_state.h"
-#include "fault_manager.h"
+#include "MCAL/power_manager.h"
+#include "BSW/Services/system_state.h"
+#include "BSW/Services/fault_manager.h"
 
 /* ---- ignition output GPIO --------------------------------------------- */
 #define IGNITION_GPIO_RCU    RCU_GPIOF
@@ -108,18 +108,16 @@ void board_init(void)
 
     ignition_gpio_init();
 
-    can_gpio_config();
-    can_config(DTM_CAN4, 1000U);
-    can_enable_rx_interrupt(DTM_CAN4, CAN4_RX_IRQ_PRIO);
+    can_app_init();
 
-    (void)bmp280_init(BMP280_I2C_ADDR_0X76);
+    (void)pressure_sensor_init(0x76U);
 
     /* 4路DS18B20：分区测温，每路对应一个加热/制冷分区 */
     temp_sensor_init();
 
     /* adc_manager_init();  // TODO: re-enable once power-up hang is resolved */
 
-    mq9_init(NULL);
+    gas_sensor_init(NULL);
 
     pwm_gd32_init(20000U);
 
