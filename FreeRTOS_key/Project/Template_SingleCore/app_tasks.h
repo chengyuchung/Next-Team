@@ -8,6 +8,19 @@ extern "C" {
 #endif
 
 /*
+ * Compact queue element for the CAN4 RX queue.
+ * can_receive_message_struct holds a 64-byte data[] array (CAN-FD size),
+ * but the application only ever uses classic 8-byte frames.
+ * Using this trimmed struct saves ~60 bytes per queue slot (8 slots → 480 B).
+ */
+typedef struct {
+    uint32_t id;          /* 11-bit (standard) or 29-bit (extended) ID */
+    uint8_t  xtd;         /* 0 = standard frame, 1 = extended frame */
+    uint8_t  data_bytes;  /* actual payload length (0-8) */
+    uint8_t  data[8];     /* payload, classic CAN only */
+} can_rx_frame_t;
+
+/*
  * =============================================================================
  * 模块名称 : app_tasks
  * 文件功能 : FreeRTOS 应用层任务集中管理

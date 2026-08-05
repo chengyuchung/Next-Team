@@ -49,6 +49,7 @@ OF SUCH DAMAGE.
 #include "queue.h"
 
 #include "can.h"
+#include "app_tasks.h"  /* can_rx_frame_t */
 
 /* ============================================================
  *  Externs from user modules (defined in main.c / key.c / can.c)
@@ -224,16 +225,28 @@ void EXTI42_101_IRQHandler(void)
 void DTM_CAN4_INT0_IRQHandler(void)
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    can_receive_message_struct rx_msg;
+    can_receive_message_struct raw;
+    can_rx_frame_t rx_frame;
 
     if(can_interrupt_flag_get(DTM_CAN4, CAN_INT_FLAG_RFIFO0_NEW)) {
         can_interrupt_flag_clear(DTM_CAN4, CAN_INT_FLAG_RFIFO0_NEW);
 
-        can_struct_para_init(CAN_RX_MESSAGE_STRUCT, &rx_msg);
-        can_message_receive(DTM_CAN4, CAN_RXFIFO0, &rx_msg);
+        can_struct_para_init(CAN_RX_MESSAGE_STRUCT, &raw);
+        can_message_receive(DTM_CAN4, CAN_RXFIFO0, &raw);
+
+        /* Copy only the fields the application needs into the compact frame */
+        rx_frame.id         = raw.id;
+        rx_frame.xtd        = (raw.xtd != (uint32_t)CAN_FF_STANDARD) ? 1U : 0U;
+        rx_frame.data_bytes = (raw.data_bytes > 8U) ? 8U : (uint8_t)raw.data_bytes;
+        {
+            uint8_t i;
+            for(i = 0U; i < rx_frame.data_bytes; i++) {
+                rx_frame.data[i] = raw.data[i];
+            }
+        }
 
         if(NULL != can4_rx_queue) {
-            xQueueSendFromISR(can4_rx_queue, &rx_msg, &xHigherPriorityTaskWoken);
+            xQueueSendFromISR(can4_rx_queue, &rx_frame, &xHigherPriorityTaskWoken);
         }
         if((NULL != guard_key1_sem) && (s_guard_mode_active != 0U)) {
             xSemaphoreGiveFromISR(guard_key1_sem, &xHigherPriorityTaskWoken);

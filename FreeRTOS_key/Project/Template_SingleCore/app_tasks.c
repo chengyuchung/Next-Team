@@ -29,6 +29,28 @@
 #include "app_tasks.h"
 
 #include "can.h"
+
+/* ============================================================
+ *  FreeRTOS hook implementations (required by FreeRTOSConfig.h)
+ * ============================================================ */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+    /* Stack overflow detected: disable interrupts and halt.
+     * Attach a debugger and inspect pcTaskName to identify the offending task.
+     * Consider increasing the stack size via the APP/GUARD/CANRX_TASK_STACK macros. */
+    taskDISABLE_INTERRUPTS();
+    for( ;; ) {}
+}
+
+void vApplicationMallocFailedHook(void)
+{
+    /* Heap exhausted: disable interrupts and halt.
+     * Increase configTOTAL_HEAP_SIZE in FreeRTOSConfig.h if this is hit. */
+    taskDISABLE_INTERRUPTS();
+    for( ;; ) {}
+}
 #include "watchdog.h"
 #include "bmp280.h"
 #include "temp_sensor.h"
@@ -153,16 +175,18 @@ static void init_task(void *pvParameters)
     /* create IPC used by ISRs (gd32a7xx_it.c) */
     ignition_sem   = xSemaphoreCreateBinary();
     guard_key1_sem = xSemaphoreCreateBinary();
-    can4_rx_queue  = xQueueCreate(CAN4_RX_QUEUE_LEN, sizeof(can_receive_message_struct));
-    configASSERT(ignition_sem != NULL);
+    /* Use can_rx_frame_t (14 B) instead of can_receive_message_struct (76 B)
+     * to save 496 B of heap across the 8-slot queue. */
+    can4_rx_queue  = xQueueCreate(CAN4_RX_QUEUE_LEN, sizeof(can_rx_frame_t));
+    configASSERT(ignition_sem   != NULL);
     configASSERT(guard_key1_sem != NULL);
-    configASSERT(can4_rx_queue != NULL);
+    configASSERT(can4_rx_queue  != NULL);
 
     /* create application tasks */
-    xTaskCreate(app_task,      "APP", APP_TASK_STACK,      NULL, APP_TASK_PRIO,      &s_app_task_handle);
-    xTaskCreate(guard_task,    "GUARD", GUARD_TASK_STACK,  NULL, GUARD_TASK_PRIO,    NULL);
-    xTaskCreate(ignition_task, "IGN", IGNITION_TASK_STACK, NULL, IGNITION_TASK_PRIO, NULL);
-    xTaskCreate(can_rx_task,   "CANRX", CAN_RX_TASK_STACK, NULL, CAN_RX_TASK_PRIO,   NULL);
+    configASSERT(xTaskCreate(app_task,      "APP",   APP_TASK_STACK,      NULL, APP_TASK_PRIO,      &s_app_task_handle) == pdPASS);
+    configASSERT(xTaskCreate(guard_task,    "GUARD", GUARD_TASK_STACK,    NULL, GUARD_TASK_PRIO,    NULL)               == pdPASS);
+    configASSERT(xTaskCreate(ignition_task, "IGN",   IGNITION_TASK_STACK, NULL, IGNITION_TASK_PRIO, NULL)               == pdPASS);
+    configASSERT(xTaskCreate(can_rx_task,   "CANRX", CAN_RX_TASK_STACK,   NULL, CAN_RX_TASK_PRIO,   NULL)               == pdPASS);
 
     /* Boot default is guard mode: relay OFF, app_task suspended,
      * guard_task already inside the patrol loop. The first KEY_4 press
@@ -754,7 +778,7 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
  * ============================================================ */
 static void can_rx_task(void *pvParameters)
 {
-    can_receive_message_struct rx_msg;
+    can_rx_frame_t rx_msg;
     (void)pvParameters;
 
     for( ;; ) {
@@ -764,7 +788,8 @@ static void can_rx_task(void *pvParameters)
             uint8_t param[6] = {0};
             uint8_t i;
 
-            if(rx_msg.xtd != CAN_FF_STANDARD) {
+            /* xtd: 0 = standard frame (only these are accepted) */
+            if(rx_msg.xtd != 0U) {
                 continue;
             }
 
