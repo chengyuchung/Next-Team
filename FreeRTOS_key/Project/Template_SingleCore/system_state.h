@@ -80,6 +80,14 @@ extern uint16_t g_danger_temp_threshold_tenths; /* 危险阈值，单位 0.1°C 
 extern uint8_t g_fallback_confirm_count;        /* 回落确认次数 */
 
 /*
+ * 温度趋势预测配置参数（主动预警功能）
+ *   通过温度变化率预测未来温度，在达到阈值前提前触发状态升级
+ */
+extern uint8_t g_temp_prediction_enable;        /* 预测功能使能，1=开启，0=关闭 */
+extern uint8_t g_temp_prediction_horizon_s;     /* 预测时间窗口，单位秒，建议 10~30s */
+extern uint16_t g_temp_prediction_min_rate;     /* 最小触发斜率，单位 0.01°C/s，过滤噪声 */
+
+/*
  * system_state_t
  *   状态机当前状态枚举。
  *   该枚举用于描述系统当前所处的风险等级，以及状态机迁移方向。
@@ -143,6 +151,9 @@ typedef struct {
     uint8_t buzzer_enable;
     uint8_t ignition_allowed;     /* 点火许可，DANGER 状态下强制为0 */
     uint32_t next_temperature_sample_interval_ms;
+    uint8_t predictive_alarm;     /* 温度趋势预警标志：任一分区预测将突破阈值 */
+    uint8_t zone_predictive[4];   /* 各分区预测触发标志，1=该分区触发预测升级 */
+    int16_t zone_temp_rate[4];    /* 各分区温度变化率，单位 0.01°C/s，符号表示升降 */
 } system_state_status_t;
 
 /*
@@ -171,6 +182,13 @@ typedef struct {
  *       温度数据整体是否有效（至少一路有效）。若为无效，则状态机不执行温度风险判断，只维持基础状态；
  *   now_ms
  *       当前系统时间戳，单位为毫秒。用于状态切换时的时间基准和采样周期管理；
+ *   temp_sample_time_ms
+ *       温度样本的实际采集时间戳。异步采集架构下，温度由独立任务约每秒刷新一次，
+ *       而状态机可能被高频调用（如 20ms）。温度变化率必须基于"两次真实采样之间的
+ *       时间差"计算，因此这里单独携带采样时刻，而非用 now_ms；
+ *   temp_sample_fresh
+ *       标记本帧温度是否为新采集的样本。仅当为 1 时状态机才更新温度变化率，
+ *       避免同一份缓存被反复计算导致 dt 过小、斜率失真；
  *   ignition_on
  *       点火/系统运行许可。它不会决定状态机是否运行，但可作为后续保护逻辑的输入。
  */
@@ -186,6 +204,10 @@ typedef struct {
     uint8_t temp_sensor_fault_mask;
     uint8_t temperature_valid;
     uint32_t now_ms;
+    uint32_t temp_sample_time_ms;  /* 温度样本的实际采集时间戳（由采集任务打点）。
+                                    * 用于温度变化率计算：只有该时间戳变化才认为是新样本，
+                                    * 与状态机自身的调用频率(now_ms)解耦，避免高频调用污染斜率。 */
+    uint8_t temp_sample_fresh;     /* 1=本次输入携带的是一帧新温度样本；0=沿用上一帧缓存。 */
     uint8_t ignition_on;
 } system_state_input_t;
 

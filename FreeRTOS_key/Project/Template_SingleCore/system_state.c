@@ -11,6 +11,13 @@ uint16_t g_danger_temp_threshold_tenths = SYSTEM_STATE_DEFAULT_DANGER_TEMP_C;
 uint8_t g_fallback_confirm_count        = SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT;
 
 /*
+ * 温度趋势预测配置参数（主动预警功能）
+ */
+uint8_t g_temp_prediction_enable     = 1U;   /* 默认开启 */
+uint8_t g_temp_prediction_horizon_s  = 15U;  /* 预测窗口 15 秒 */
+uint16_t g_temp_prediction_min_rate  = 10U;  /* 最小斜率 0.1°C/s */
+
+/*
  * 外部状态变化标志
  *   由状态机在发生有效状态切换时置位，通常由主循环或上层任务轮询处理。
  *   它只表示“状态已经变化”，不直接代表故障、告警或安全锁定。
@@ -54,6 +61,29 @@ static uint8_t s_initialized = 0U;
 static uint8_t s_zone_low_temp_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_high_temp_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_danger_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
+
+/*
+ * 温度趋势预测历史数据（用于计算变化率）
+ *
+ *   变化率必须基于"两次真实温度采样之间的时间差"计算。异步采集架构下，
+ *   温度由独立任务约每秒刷新一次，而状态机可能被高频调用（如 20ms）。
+ *   因此这里以温度样本自带的时间戳(temp_sample_time_ms)为基准，并且只在
+ *   input->temp_sample_fresh 为 1（确实来了一帧新样本）时才推进历史，
+ *   彻底与状态机的调用频率解耦。
+ *
+ *   s_zone_prev_temp[i]       : 分区 i 上一帧样本温度，单位 0.1°C
+ *   s_zone_prev_valid[i]      : 分区 i 上一帧样本是否有效
+ *   s_zone_temp_rate[i]       : 分区 i 温度变化率（EMA平滑后），单位 0.01°C/s
+ *   s_zone_rate_valid[i]      : 分区 i 变化率是否有效（至少有 2 个历史样本）
+ *   s_prev_sample_time_ms     : 上一帧被采纳样本的采集时间戳，用于计算 dt
+ *   s_prev_sample_valid       : 是否已有一帧基准样本
+ */
+static int16_t s_zone_prev_temp[4] = {0, 0, 0, 0};
+static uint8_t s_zone_prev_valid[4] = {0U, 0U, 0U, 0U};
+static int16_t s_zone_temp_rate[4] = {0, 0, 0, 0};
+static uint8_t s_zone_rate_valid[4] = {0U, 0U, 0U, 0U};
+static uint32_t s_prev_sample_time_ms = 0U;
+static uint8_t s_prev_sample_valid = 0U;
 
 
 
@@ -219,6 +249,10 @@ static void system_state_sync_common_outputs(uint32_t now_ms)
     }
     s_status.buzzer_enable = 0U;
     s_status.ignition_allowed = 1U;
+    s_status.predictive_alarm = 0U;
+    for(i = 0U; i < 4U; i++) {
+        s_status.zone_predictive[i] = 0U;
+    }
     g_system_state_changed_flag = 0U;
 }
 
@@ -304,6 +338,162 @@ static uint8_t system_state_zone_has_danger(const system_state_input_t *input, u
     }
 
     return (uint8_t)(input->zone_temperature_tenths[zone_idx] >= (int16_t)g_danger_temp_threshold_tenths);
+}
+
+/*
+ * system_state_update_temp_rates
+ *   在收到一帧新温度样本时，更新全部 4 个分区的温度变化率（带 EMA 平滑）。
+ *
+ *   与旧实现的关键区别：本函数由"新样本"驱动，而不是由状态机调用频率驱动。
+ *   dt 取自两帧样本自带的采集时间戳之差（input->temp_sample_time_ms），
+ *   因此即使 app_task 以 20ms 高频调用状态机，只要温度还是同一帧缓存，
+ *   就不会重复推进历史，斜率始终反映真实的每秒温度变化。
+ *
+ * 说明
+ *   - 变化率单位：0.01°C/s（例如 rate=100 表示 1.0°C/s）
+ *   - EMA 平滑系数 α=0.3，快速响应突变但抑制噪声
+ *   - 两帧样本间隔 < 100ms 或 > 5000ms 视为异常（例如 guard 长睡眠后），
+ *     只把当前帧作为新基准重置，不据此算斜率，避免产生虚假的巨大斜率
+ */
+static void system_state_update_temp_rates(const system_state_input_t *input)
+{
+    int32_t dt_ms;
+    uint8_t zone_idx;
+    uint8_t dt_usable;
+
+    if(input == NULL) {
+        return;
+    }
+
+    /* 首帧样本：只记录基准，不算斜率 */
+    if(s_prev_sample_valid == 0U) {
+        for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
+            if(input->zone_temp_valid[zone_idx] != 0U) {
+                s_zone_prev_temp[zone_idx] = input->zone_temperature_tenths[zone_idx];
+                s_zone_prev_valid[zone_idx] = 1U;
+            }
+        }
+        s_prev_sample_time_ms = input->temp_sample_time_ms;
+        s_prev_sample_valid = 1U;
+        return;
+    }
+
+    dt_ms = (int32_t)(input->temp_sample_time_ms - s_prev_sample_time_ms);
+    dt_usable = (uint8_t)((dt_ms >= 100) && (dt_ms <= 5000));
+
+    for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
+        int32_t dtemp;
+        int32_t rate_raw;
+        int32_t rate_filtered;
+        int16_t current_temp;
+
+        if(input->zone_temp_valid[zone_idx] == 0U) {
+            /* 该分区本帧无效：不推进它的历史，下次有效时重新建立基准 */
+            s_zone_prev_valid[zone_idx] = 0U;
+            s_zone_rate_valid[zone_idx] = 0U;
+            continue;
+        }
+
+        current_temp = input->zone_temperature_tenths[zone_idx];
+
+        if((dt_usable == 0U) || (s_zone_prev_valid[zone_idx] == 0U)) {
+            /* 时间间隔异常或该分区缺少上一帧基准：仅重置基准 */
+            s_zone_prev_temp[zone_idx] = current_temp;
+            s_zone_prev_valid[zone_idx] = 1U;
+            s_zone_rate_valid[zone_idx] = 0U;
+            continue;
+        }
+
+        dtemp = (int32_t)current_temp - (int32_t)s_zone_prev_temp[zone_idx];
+        rate_raw = (dtemp * 100000) / dt_ms;
+
+        if(s_zone_rate_valid[zone_idx] == 0U) {
+            s_zone_temp_rate[zone_idx] = (int16_t)rate_raw;
+            s_zone_rate_valid[zone_idx] = 1U;
+        } else {
+            rate_filtered = (rate_raw * 30 + (int32_t)s_zone_temp_rate[zone_idx] * 70) / 100;
+            s_zone_temp_rate[zone_idx] = (int16_t)rate_filtered;
+        }
+
+        s_zone_prev_temp[zone_idx] = current_temp;
+        s_zone_prev_valid[zone_idx] = 1U;
+    }
+
+    s_prev_sample_time_ms = input->temp_sample_time_ms;
+}
+
+/*
+ * system_state_zone_predict_danger
+ *   预测指定分区在未来时间窗口内是否会突破危险阈值。
+ *
+ * 返回值
+ *   1 = 预测将突破危险阈值（需提前升级到 DANGER）
+ *   0 = 不会突破或预测功能未启用
+ */
+static uint8_t system_state_zone_predict_danger(const system_state_input_t *input, uint8_t zone_idx)
+{
+    int32_t predicted_temp;
+    int32_t rate;
+    int32_t horizon_ms;
+
+    if((g_temp_prediction_enable == 0U) || (input == NULL) || (zone_idx >= 4U)) {
+        return 0U;
+    }
+
+    if((input->zone_temp_valid[zone_idx] == 0U) || (s_zone_rate_valid[zone_idx] == 0U)) {
+        return 0U;
+    }
+
+    rate = (int32_t)s_zone_temp_rate[zone_idx];
+    if(rate < (int32_t)g_temp_prediction_min_rate) {
+        return 0U;
+    }
+
+    horizon_ms = (int32_t)g_temp_prediction_horizon_s * 1000;
+    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 100000;
+
+    if(predicted_temp >= (int32_t)g_danger_temp_threshold_tenths) {
+        return 1U;
+    }
+
+    return 0U;
+}
+
+/*
+ * system_state_zone_predict_high_temp
+ *   预测指定分区在未来时间窗口内是否会突破高温阈值。
+ *
+ * 返回值
+ *   1 = 预测将突破高温阈值（需提前升级到 HIGH_TEMP）
+ *   0 = 不会突破或预测功能未启用
+ */
+static uint8_t system_state_zone_predict_high_temp(const system_state_input_t *input, uint8_t zone_idx)
+{
+    int32_t predicted_temp;
+    int32_t rate;
+    int32_t horizon_ms;
+
+    if((g_temp_prediction_enable == 0U) || (input == NULL) || (zone_idx >= 4U)) {
+        return 0U;
+    }
+
+    if((input->zone_temp_valid[zone_idx] == 0U) || (s_zone_rate_valid[zone_idx] == 0U)) {
+        return 0U;
+    }
+
+    rate = (int32_t)s_zone_temp_rate[zone_idx];
+    if(rate < (int32_t)g_temp_prediction_min_rate) {
+        return 0U;
+    }
+
+    horizon_ms = (int32_t)g_temp_prediction_horizon_s * 1000;
+    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 100000;
+
+    if(predicted_temp >= (int32_t)g_high_temp_threshold_tenths) {
+        return 1U;
+    }
+
+    return 0U;
 }
 
 /*
@@ -485,6 +675,17 @@ void system_state_init(void)
         s_status.zone_state[i] = SYSTEM_STATE_NORMAL;
         system_state_zone_clear_fall_counters(i);
     }
+
+    /* 初始化温度趋势预测历史数据 */
+    for(i = 0U; i < 4U; i++) {
+        s_zone_prev_temp[i] = 0;
+        s_zone_prev_valid[i] = 0U;
+        s_zone_temp_rate[i] = 0;
+        s_zone_rate_valid[i] = 0U;
+    }
+    s_prev_sample_time_ms = 0U;
+    s_prev_sample_valid = 0U;
+
     s_last_input_valid = 0U;
     s_initialized = 1U;
 }
@@ -518,6 +719,16 @@ void system_state_reset(void)
         system_state_zone_clear_fall_counters(i);
     }
 
+    /* 清空温度趋势预测历史数据 */
+    for(i = 0U; i < 4U; i++) {
+        s_zone_prev_temp[i] = 0;
+        s_zone_prev_valid[i] = 0U;
+        s_zone_temp_rate[i] = 0;
+        s_zone_rate_valid[i] = 0U;
+    }
+    s_prev_sample_time_ms = 0U;
+    s_prev_sample_valid = 0U;
+
     /* 标记系统已完成初始化 */
     s_last_input_valid = 0U;
     s_initialized = 1U;
@@ -550,16 +761,39 @@ void system_state_task(const system_state_input_t *input)
     old_global_state = s_status.state;
 
     /*
+     * 温度变化率更新：仅在收到一帧新温度样本时推进历史。
+     * 异步采集下 app_task 以 20ms 高频调用本状态机，但温度约 1s 才刷新一次，
+     * 用 temp_sample_fresh 过滤掉重复缓存，保证斜率基于真实采样间隔。
+     */
+    if(input->temp_sample_fresh != 0U) {
+        system_state_update_temp_rates(input);
+    }
+
+    /*
      * 4个分区各自独立跑一遍状态机：
      *   - 每个分区依据自己的 zone_temperature_tenths[i]/zone_temp_valid[i] 判断；
      *   - gas_alarm/pressure_alarm 是全局传感器输入，会同时参与每个分区的判断；
      *   - 分区状态迁移完成后立即刷新该分区的 heater_enable[i]/cooler_enable[i]。
+     *   - 融合温度趋势预测：如果预测将突破阈值，提前升级状态
      */
     for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
-        uint8_t has_danger_i = system_state_zone_has_danger(input, zone_idx);
-        uint8_t has_high_i = (uint8_t)(!has_danger_i && system_state_zone_has_high_temp(input, zone_idx));
-        uint8_t has_low_i = (uint8_t)(!has_danger_i && !has_high_i &&
+        uint8_t has_danger_actual = system_state_zone_has_danger(input, zone_idx);
+        uint8_t has_high_actual = (uint8_t)(!has_danger_actual && system_state_zone_has_high_temp(input, zone_idx));
+        uint8_t has_low_i = (uint8_t)(!has_danger_actual && !has_high_actual &&
                                         system_state_zone_has_low_temp(input, zone_idx));
+
+        uint8_t predict_danger = system_state_zone_predict_danger(input, zone_idx);
+        uint8_t predict_high = (uint8_t)(!predict_danger && system_state_zone_predict_high_temp(input, zone_idx));
+
+        uint8_t has_danger_i = (uint8_t)(has_danger_actual || predict_danger);
+        uint8_t has_high_i = (uint8_t)(has_high_actual || predict_high);
+
+        if((predict_danger != 0U) || (predict_high != 0U)) {
+            s_status.zone_predictive[zone_idx] = 1U;
+            s_status.predictive_alarm = 1U;
+        }
+
+        s_status.zone_temp_rate[zone_idx] = s_zone_temp_rate[zone_idx];
 
         system_state_zone_task(zone_idx, input, has_danger_i, has_high_i, has_low_i);
     }

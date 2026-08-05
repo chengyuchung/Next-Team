@@ -64,21 +64,35 @@ void vApplicationMallocFailedHook(void)
 #include "system_state.h"
 #include "fault_manager.h"
 
-/* ---- task priorities (configMAX_PRIORITIES == 8) ---------------------- */
+/* ---- task priorities (configMAX_PRIORITIES == 8) ----------------------
+ * TEMP_TASK 优先级高于 APP_TASK：DS18B20 的 1-Wire 位时序对延时极敏感
+ * （读采样窗口 ~15us），若被 app_task 抢占会破坏位时序导致 CRC 失败。
+ * 让温度任务优先级更高，可保证它短促的位操作突发不被 app_task 打断；
+ * 而 750ms 的转换等待用 vTaskDelay 让出 CPU，因此不会饿死 app_task。 */
 #define INIT_TASK_PRIO       ( tskIDLE_PRIORITY + 1 )
 #define APP_TASK_PRIO        ( tskIDLE_PRIORITY + 2 )
 #define GUARD_TASK_PRIO      ( tskIDLE_PRIORITY + 2 )
+#define TEMP_TASK_PRIO       ( tskIDLE_PRIORITY + 3 )
 #define IGNITION_TASK_PRIO   ( tskIDLE_PRIORITY + 3 )
 #define CAN_RX_TASK_PRIO     ( tskIDLE_PRIORITY + 3 )
 
 /* ---- task stack sizes (in words) -------------------------------------- */
 #define APP_TASK_STACK       ( configMINIMAL_STACK_SIZE * 4 )
 #define GUARD_TASK_STACK     ( configMINIMAL_STACK_SIZE * 4 )
+#define TEMP_TASK_STACK      ( configMINIMAL_STACK_SIZE * 2 )
 #define IGNITION_TASK_STACK  ( configMINIMAL_STACK_SIZE * 2 )
 #define CAN_RX_TASK_STACK    ( configMINIMAL_STACK_SIZE * 4 )
 
-/* ---- application timing ----------------------------------------------- */
-#define APP_TASK_PERIOD_MS   ( 20U )
+/* ---- application timing -----------------------------------------------
+ * 100ms 控制周期：对电池包热管理这类大惯性系统，10Hz 已足够快，
+ * 相比 20ms 大幅降低 CPU 占用与调度开销，也给 tickless idle 更多机会。 */
+#define APP_TASK_PERIOD_MS   ( 500U )
+
+/* 温度采集周期：DS18B20 12bit 转换约需 750ms，取 1000ms 留余量。
+ * 温度是大惯性物理量，1Hz 采样对电池包热管理足够；温度趋势预测
+ * 也是基于真实采样间隔算斜率，与该周期一致。 */
+#define TEMP_SAMPLE_PERIOD_MS       ( 1000U )
+#define TEMP_CONVERSION_WAIT_MS     ( 780U )  /* 启动转换后让出 CPU 的等待时间 */
 
 /* 运行时可配置参数定义（通过 CAN 0x20 配置类命令动态修改） */
 uint32_t g_app_task_period_ms         = APP_TASK_PERIOD_MS;
@@ -134,14 +148,93 @@ static uint8_t s_ignition_locked = 0U;   /* 1 = DANGER 状态强制锁定，禁�
  * 由 0x0C/0x0D 显式切换；DANGER 状态会强制清零并夺回控制权。 */
 static volatile uint8_t s_manual_mode = 0U;
 static TaskHandle_t s_app_task_handle = NULL;
+static TaskHandle_t s_temp_task_handle = NULL;
 /* note: not static, ISRs in gd32a7xx_it.c need to read this to know
  * whether an external event (CAN RX) should also wake guard_task.
  * guard_enter/exit are the only writers. */
 volatile uint8_t s_guard_mode_active = 0U;
 
+/* ============================================================
+ *  温度缓存（异步采集架构）
+ *
+ *  由 temp_task 约每秒刷新一次，app_task / guard_task 以非阻塞方式读取。
+ *  这样温度采集那 ~800ms 的耗时不再阻塞 20ms 的高频控制循环，状态机得以
+ *  真正按 g_app_task_period_ms 周期运行，同时温度趋势预测基于 sample_time_ms
+ *  的真实采样间隔计算斜率。
+ *
+ *  访问一律通过互斥锁保护，保证 temp_result_t 这一整块数据的读写原子性。
+ * ============================================================ */
+typedef struct {
+    temp_result_t result;       /* 最近一次采集结果 */
+    uint32_t sample_time_ms;    /* 该结果的采集完成时间戳 */
+    uint8_t  has_sample;        /* 是否已至少完成过一次采集 */
+} temp_cache_t;
+
+static temp_cache_t     s_temp_cache;
+static SemaphoreHandle_t s_temp_cache_mutex = NULL;
+/* 记录状态机上一次消费的温度样本时间戳，用于判定本帧是否为新样本
+ * （新样本才推进温度变化率历史）。 */
+static uint32_t         s_consumed_sample_time_ms = 0U;
+static uint8_t          s_consumed_sample_valid = 0U;
+
+/*
+ * temp_cache_store
+ *   把一帧采集结果写入缓存（加锁保护）。由采集侧（temp_task / guard 巡检）调用。
+ */
+static void temp_cache_store(const temp_result_t *result, uint32_t sample_time_ms)
+{
+    if((result == NULL) || (s_temp_cache_mutex == NULL)) {
+        return;
+    }
+    if(xSemaphoreTake(s_temp_cache_mutex, portMAX_DELAY) == pdTRUE) {
+        s_temp_cache.result = *result;
+        s_temp_cache.sample_time_ms = sample_time_ms;
+        s_temp_cache.has_sample = 1U;
+        (void)xSemaphoreGive(s_temp_cache_mutex);
+    }
+}
+
+/*
+ * temp_cache_load
+ *   从缓存读取最近一帧结果（加锁保护）。由消费侧（状态机输入组装）调用。
+ *   返回 1 表示缓存中已有有效样本；0 表示尚未完成过任何采集。
+ */
+static uint8_t temp_cache_load(temp_result_t *result, uint32_t *sample_time_ms)
+{
+    uint8_t has_sample = 0U;
+
+    if((result == NULL) || (sample_time_ms == NULL) || (s_temp_cache_mutex == NULL)) {
+        return 0U;
+    }
+    if(xSemaphoreTake(s_temp_cache_mutex, portMAX_DELAY) == pdTRUE) {
+        *result = s_temp_cache.result;
+        *sample_time_ms = s_temp_cache.sample_time_ms;
+        has_sample = s_temp_cache.has_sample;
+        (void)xSemaphoreGive(s_temp_cache_mutex);
+    }
+    return has_sample;
+}
+
+/*
+ * temp_sample_blocking_to_cache
+ *   同步完成一次完整温度采集（忙等约 750ms）并写入缓存。
+ *   供 guard 巡检使用：此时 app_task 与 temp_task 均已挂起，忙等无副作用。
+ */
+static void temp_sample_blocking_to_cache(uint32_t now_ms)
+{
+    temp_result_t result;
+    if(temp_get(&result) != 0U) {
+        temp_cache_store(&result, now_ms);
+    } else {
+        /* 全部失效也要写入缓存，让状态机据此把各分区标记为无效 */
+        temp_cache_store(&result, now_ms);
+    }
+}
+
 /* ---- forward declarations --------------------------------------------- */
 static void init_task(void *pvParameters);
 static void app_task(void *pvParameters);
+static void temp_task(void *pvParameters);
 static void guard_task(void *pvParameters);
 static void ignition_task(void *pvParameters);
 static void can_rx_task(void *pvParameters);
@@ -175,18 +268,22 @@ static void init_task(void *pvParameters)
     /* create IPC used by ISRs (gd32a7xx_it.c) */
     ignition_sem   = xSemaphoreCreateBinary();
     guard_key1_sem = xSemaphoreCreateBinary();
+    /* 温度缓存互斥锁：保护 temp_task 写入与消费侧读取之间的数据一致性 */
+    s_temp_cache_mutex = xSemaphoreCreateMutex();
     /* Use can_rx_frame_t (14 B) instead of can_receive_message_struct (76 B)
      * to save 496 B of heap across the 8-slot queue. */
     can4_rx_queue  = xQueueCreate(CAN4_RX_QUEUE_LEN, sizeof(can_rx_frame_t));
     configASSERT(ignition_sem   != NULL);
     configASSERT(guard_key1_sem != NULL);
+    configASSERT(s_temp_cache_mutex != NULL);
     configASSERT(can4_rx_queue  != NULL);
 
     /* create application tasks */
-    configASSERT(xTaskCreate(app_task,      "APP",   APP_TASK_STACK,      NULL, APP_TASK_PRIO,      &s_app_task_handle) == pdPASS);
-    configASSERT(xTaskCreate(guard_task,    "GUARD", GUARD_TASK_STACK,    NULL, GUARD_TASK_PRIO,    NULL)               == pdPASS);
-    configASSERT(xTaskCreate(ignition_task, "IGN",   IGNITION_TASK_STACK, NULL, IGNITION_TASK_PRIO, NULL)               == pdPASS);
-    configASSERT(xTaskCreate(can_rx_task,   "CANRX", CAN_RX_TASK_STACK,   NULL, CAN_RX_TASK_PRIO,   NULL)               == pdPASS);
+    configASSERT(xTaskCreate(app_task,      "APP",   APP_TASK_STACK,      NULL, APP_TASK_PRIO,      &s_app_task_handle)  == pdPASS);
+    configASSERT(xTaskCreate(temp_task,     "TEMP",  TEMP_TASK_STACK,     NULL, TEMP_TASK_PRIO,     &s_temp_task_handle) == pdPASS);
+    configASSERT(xTaskCreate(guard_task,    "GUARD", GUARD_TASK_STACK,    NULL, GUARD_TASK_PRIO,    NULL)                == pdPASS);
+    configASSERT(xTaskCreate(ignition_task, "IGN",   IGNITION_TASK_STACK, NULL, IGNITION_TASK_PRIO, NULL)                == pdPASS);
+    configASSERT(xTaskCreate(can_rx_task,   "CANRX", CAN_RX_TASK_STACK,   NULL, CAN_RX_TASK_PRIO,   NULL)                == pdPASS);
 
     /* Boot default is guard mode: relay OFF, app_task suspended,
      * guard_task already inside the patrol loop. The first KEY_4 press
@@ -214,26 +311,45 @@ static void system_state_update_input(uint32_t now_ms)
     input.now_ms = now_ms;
     input.ignition_on = ignition_get();
 
-    /* 4路DS18B20分区测温：下标i对应加热片(i+1)/制冷片(i+1)所在分区，
-     * 直接按分区填入 zone_temperature_tenths/zone_temp_valid，供状态机
-     * 分区独立判断使用。 */
-    if(temp_get(&temp_result) != 0U) {
-        uint8_t zi;
-        input.temperature_valid = temp_result.valid;
-        input.temp_sensor_valid_count = temp_result.valid_count;
-        input.temp_sensor_fault_mask = temp_result.fault_mask;
-        for(zi = 0U; zi < 4U; zi++) {
-            input.zone_temperature_tenths[zi] = temp_result.temperature[zi];
-            input.zone_temp_valid[zi] = temp_result.channel_valid[zi];
+    /* 4路DS18B20分区测温：改为从温度缓存非阻塞读取（由 temp_task 约每秒刷新），
+     * 不再在这里忙等 ~800ms 采集，使控制循环得以按真实周期高频运行。
+     * 下标i对应加热片(i+1)/制冷片(i+1)所在分区。 */
+    {
+        uint32_t sample_time_ms = 0U;
+        uint8_t  has_sample = temp_cache_load(&temp_result, &sample_time_ms);
+        uint8_t  zi;
+
+        if((has_sample != 0U) && (temp_result.valid != 0U)) {
+            input.temperature_valid = temp_result.valid;
+            input.temp_sensor_valid_count = temp_result.valid_count;
+            input.temp_sensor_fault_mask = temp_result.fault_mask;
+            for(zi = 0U; zi < 4U; zi++) {
+                input.zone_temperature_tenths[zi] = temp_result.temperature[zi];
+                input.zone_temp_valid[zi] = temp_result.channel_valid[zi];
+            }
+        } else {
+            input.temperature_valid = 0U;
+            input.temp_sensor_valid_count = 0U;
+            input.temp_sensor_fault_mask = 0x0FU;
+            for(zi = 0U; zi < 4U; zi++) {
+                input.zone_temperature_tenths[zi] = 0;
+                input.zone_temp_valid[zi] = 0U;
+            }
         }
-    } else {
-        uint8_t zi;
-        input.temperature_valid = 0U;
-        input.temp_sensor_valid_count = 0U;
-        input.temp_sensor_fault_mask = 0x0FU;
-        for(zi = 0U; zi < 4U; zi++) {
-            input.zone_temperature_tenths[zi] = 0;
-            input.zone_temp_valid[zi] = 0U;
+
+        /* 携带样本采集时间戳，并判定本帧是否为"新样本"：
+         * 只有采集时间戳相对上次消费发生变化，才认为来了新的一帧温度，
+         * 供状态机据此推进温度变化率历史（与调用频率解耦）。 */
+        input.temp_sample_time_ms = sample_time_ms;
+        if(has_sample == 0U) {
+            input.temp_sample_fresh = 0U;
+        } else if((s_consumed_sample_valid == 0U) ||
+                  (sample_time_ms != s_consumed_sample_time_ms)) {
+            input.temp_sample_fresh = 1U;
+            s_consumed_sample_time_ms = sample_time_ms;
+            s_consumed_sample_valid = 1U;
+        } else {
+            input.temp_sample_fresh = 0U;
         }
     }
 
@@ -347,6 +463,60 @@ static void app_task(void *pvParameters)
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(g_app_task_period_ms));
     }
 }
+
+/* ============================================================
+ *  temp_task : 独立温度采集任务（异步采集架构核心）。
+ *
+ *  职责：约每 TEMP_SAMPLE_PERIOD_MS(1s) 完成一次 4 路 DS18B20 采集，
+ *        把结果写入受互斥锁保护的温度缓存，供 app_task 非阻塞读取。
+ *
+ *  为什么单独成任务：
+ *    - DS18B20 12bit 转换约需 750ms。若在 app_task 里同步采集，会把本应
+ *      20ms 的控制循环拖成 ~800ms，状态机响应、CAN 处理、喂狗全部被拖慢。
+ *    - 拆出来后，app_task 真正按 20ms 周期跑，温度按 1s 周期在后台刷新。
+ *
+ *  为什么优先级高于 app_task 且用分阶段采集：
+ *    - 1-Wire 位时序对延时极敏感，位操作突发期间不能被 app_task 抢占，
+ *      否则时序错乱、CRC 失败。高优先级保证位操作突发不被打断。
+ *    - 但 750ms 转换等待用 vTaskDelay 让出 CPU（不是忙等），期间 app_task
+ *      正常运行，因此高优先级不会饿死控制循环。
+ *
+ *  时序：
+ *    temp_start_all()           // 阶段1：启动转换（几 ms 位操作，不被抢占）
+ *    vTaskDelay(780ms)          // 让出 CPU，app_task 期间照常跑
+ *    temp_read_all()            // 阶段3：读取+CRC（几~十几 ms 位操作）
+ *    temp_cache_store()         // 写缓存
+ *    vTaskDelayUntil(剩余到 1s) // 对齐采样周期
+ *
+ *  guard 模式：进入 guard 时本任务被挂起（sensors 断电，采集无意义），
+ *  巡检期间由 guard_task 自行同步采集并写缓存（见 guard_task）。
+ * ============================================================ */
+static void temp_task(void *pvParameters)
+{
+    TickType_t last_wake = xTaskGetTickCount();
+    (void)pvParameters;
+
+    for( ;; ) {
+        temp_result_t result;
+        uint32_t sample_time_ms;
+
+        /* 阶段1：启动全部通道转换（短促位操作，高优先级下不被 app_task 抢占） */
+        temp_start_all();
+
+        /* 阶段2：让出 CPU 等待转换完成。这段时间 app_task 照常以 20ms 运行。 */
+        vTaskDelay(pdMS_TO_TICKS(TEMP_CONVERSION_WAIT_MS));
+
+        /* 阶段3：读取 + CRC 校验，得到每一路温度 */
+        (void)temp_read_all(&result);
+        sample_time_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+        /* 写入缓存供状态机消费 */
+        temp_cache_store(&result, sample_time_ms);
+
+        /* 对齐到固定采样周期（已消耗约 780ms+读取时间，这里补足到 1s） */
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TEMP_SAMPLE_PERIOD_MS));
+    }
+}
 /* ============================================================
  *  guard_enter / guard_exit : housekeeping around the patrol loop.
  *  Suspending app_task (rather than just leaving it running) is what
@@ -360,6 +530,12 @@ static void guard_enter(void)
 
     if(s_app_task_handle != NULL) {
         vTaskSuspend(s_app_task_handle);
+    }
+
+    /* 挂起温度采集任务：guard 模式下继电器断电，DS18B20 无供电，采集无意义。
+     * 巡检窗口内改由 guard_task 在重新上电后自行同步采集并写缓存。 */
+    if(s_temp_task_handle != NULL) {
+        vTaskSuspend(s_temp_task_handle);
     }
 
     /* stop actuators driven by the normal control loop before sleeping */
@@ -386,6 +562,12 @@ static void guard_exit(void)
 
     if(s_app_task_handle != NULL) {
         vTaskResume(s_app_task_handle);
+    }
+
+    /* 恢复温度采集任务：回到正常模式，后台采集重新接管温度缓存刷新。
+     * 采样历史让状态机在收到新样本时自然重建，无需在此特殊处理。 */
+    if(s_temp_task_handle != NULL) {
+        vTaskResume(s_temp_task_handle);
     }
 }
 
@@ -466,6 +648,9 @@ static void guard_task(void *pvParameters)
                 while(xTaskGetTickCount() < patrol_end) {
                     uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
+                    /* temp_task 在 guard 模式下已挂起，这里同步采集一次温度写入缓存，
+                     * 再交给状态机消费（等价于旧版 update_input 内部的同步采集）。 */
+                    temp_sample_blocking_to_cache(now_ms);
                     system_state_update_input(now_ms);
 
                     if(g_system_state_changed_flag != 0U) {
@@ -510,6 +695,8 @@ static void guard_task(void *pvParameters)
                    && (s_guard_mode_active != 0U)) {
                     uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
+                    /* 同上：guard 模式下 temp_task 已挂起，先同步采集写缓存 */
+                    temp_sample_blocking_to_cache(now_ms);
                     system_state_update_input(now_ms);
 
                     if(g_system_state_changed_flag != 0U) {

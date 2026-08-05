@@ -16,9 +16,16 @@
 
 static temp_result_t s_last_result;
 
+/* 分阶段采集时，保存 temp_start_all() 各通道的启动状态，供 temp_read_all() 使用。 */
+static uint8_t s_started[DS18B20_GD32_CHANNEL_COUNT];
+
 void temp_sensor_init(void)
 {
+    uint8_t i;
     memset(&s_last_result, 0, sizeof(s_last_result));
+    for(i = 0U; i < DS18B20_GD32_CHANNEL_COUNT; i++) {
+        s_started[i] = 0U;
+    }
     ds18b20_gd32_adapter_init();
 }
 
@@ -63,6 +70,77 @@ uint8_t temp_get(temp_result_t *result)
     /* 阶段 3：逐路读取暂存器并做 CRC 校验，记录每一路温度。 */
     for(i = 0U; i < DS18B20_GD32_CHANNEL_COUNT; i++) {
         if(started[i] == 0U) {
+            continue;
+        }
+
+        dev = ds18b20_gd32_get_device((ds18b20_gd32_channel_t)i);
+        if((dev != NULL) && (ds18b20_read_scratchpad_temp(dev, &temp) != 0U)) {
+            result->temperature[i] = temp;
+            result->channel_valid[i] = 1U;
+            if(valid_count == 0U) {
+                max_temp = temp;
+            } else if(temp > max_temp) {
+                max_temp = temp;
+            }
+            valid_count++;
+        } else {
+            fault_mask |= (uint8_t)(1U << i);
+        }
+    }
+
+    result->valid_count = valid_count;
+    result->fault_mask = fault_mask;
+    result->valid = (uint8_t)(valid_count > 0U ? 1U : 0U);
+    result->maximum_temperature = (valid_count > 0U) ? max_temp : 0;
+
+    s_last_result = *result;
+    return result->valid;
+}
+
+/*
+ * temp_start_all
+ *   分阶段采集的阶段1：并行启动全部有效通道的温度转换。
+ *   仅执行几毫秒的 1-Wire 位操作，不做等待。启动状态记录在 s_started[]。
+ */
+void temp_start_all(void)
+{
+    ds18b20_t *dev;
+    uint8_t i;
+
+    for(i = 0U; i < DS18B20_GD32_CHANNEL_COUNT; i++) {
+        dev = ds18b20_gd32_get_device((ds18b20_gd32_channel_t)i);
+        if(dev != NULL) {
+            s_started[i] = ds18b20_start_conversion(dev);
+        } else {
+            s_started[i] = 0U;
+        }
+    }
+}
+
+/*
+ * temp_read_all
+ *   分阶段采集的阶段3：逐路读取暂存器 + CRC 校验并汇总结果。
+ *   须在 temp_start_all() 之后、等待约 750ms 转换完成后调用。
+ *   中间的等待由调用方负责（可用 vTaskDelay 让出 CPU）。
+ */
+uint8_t temp_read_all(temp_result_t *result)
+{
+    ds18b20_t *dev;
+    int16_t temp;
+    int16_t max_temp = 0;
+    uint8_t i;
+    uint8_t valid_count = 0U;
+    uint8_t fault_mask = 0U;
+
+    if(result == NULL) {
+        return 0U;
+    }
+
+    memset(result, 0, sizeof(*result));
+
+    for(i = 0U; i < DS18B20_GD32_CHANNEL_COUNT; i++) {
+        if(s_started[i] == 0U) {
+            fault_mask |= (uint8_t)(1U << i);
             continue;
         }
 
