@@ -340,7 +340,7 @@
               <MiscControls> -Wassign-enum</MiscControls>
               <Define>GD32A711X_A712X</Define>
               <Undefine></Undefine>
-              <IncludePath>..\..\..\..\Library\Firmware\CMSIS;..\..\..\..\Library\Firmware\CMSIS\GD\GD32A7xx\Include;..\..\..\..\Library\Firmware\GD32A7xx_standard_peripheral\Include;..\..\..\..\Library\Utilities;..\..\Template_SingleCore;..\..\..\Third_party\FreeRTOS-10.3.1\portable\GCC\ARM_CM4F;..\..\..\Third_party\FreeRTOS-10.3.1\include</IncludePath>
+              <IncludePath>..\..\..\..\Library\Firmware\CMSIS;..\..\..\..\Library\Firmware\CMSIS\GD\GD32A7xx\Include;..\..\..\..\Library\Firmware\GD32A7xx_standard_peripheral\Include;..\..\..\..\Library\Utilities;..\..\Template_SingleCore;..\..\..\Third_party\FreeRTOS-10.3.1\portable\GCC\ARM_CM4F;..\..\..\Third_party\FreeRTOS-10.3.1\include;..\..\Template_SingleCore\MCAL;..\..\Template_SingleCore\App;..\..\Template_SingleCore\BSW\EcuAL;..\..\Template_SingleCore\BSW\Services</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -395,89 +395,39 @@
               <FilePath>..\main.c</FilePath>
             </File>
             <File>
-              <FileName>app_tasks.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\app_tasks.c</FilePath>
-            </File>
-            <File>
               <FileName>systick.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\systick.c</FilePath>
             </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>App</GroupName>
+          <Files>
             <File>
-              <FileName>actor.c</FileName>
+              <FileName>app_tasks.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\actor.c</FilePath>
+              <FilePath>..\App\app_tasks.c</FilePath>
             </File>
             <File>
-              <FileName>adc_manager.c</FileName>
+              <FileName>can_app.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\adc_manager.c</FilePath>
+              <FilePath>..\App\can_app.c</FilePath>
             </File>
             <File>
-              <FileName>bmp280.c</FileName>
+              <FileName>thermal_control.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\bmp280.c</FilePath>
+              <FilePath>..\App\thermal_control.c</FilePath>
             </File>
             <File>
-              <FileName>can.c</FileName>
+              <FileName>power_mode.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\can.c</FilePath>
+              <FilePath>..\App\power_mode.c</FilePath>
             </File>
             <File>
-              <FileName>ds18b20.c</FileName>
+              <FileName>ignition_control.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\ds18b20.c</FilePath>
-            </File>
-            <File>
-              <FileName>temp_sensor.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\temp_sensor.c</FilePath>
-            </File>
-            <File>
-              <FileName>fault_manager.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\fault_manager.c</FilePath>
-            </File>
-            <File>
-              <FileName>i2c.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\i2c.c</FilePath>
-            </File>
-            <File>
-              <FileName>key.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\key.c</FilePath>
-            </File>
-            <File>
-              <FileName>motor_pwm_gd32.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\motor_pwm_gd32.c</FilePath>
-            </File>
-            <File>
-              <FileName>mq9.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\mq9.c</FilePath>
-            </File>
-            <File>
-              <FileName>power_manager.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\power_manager.c</FilePath>
-            </File>
-            <File>
-              <FileName>relay_power.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\relay_power.c</FilePath>
-            </File>
-            <File>
-              <FileName>system_state.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\system_state.c</FilePath>
-            </File>
-            <File>
-              <FileName>watchdog.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\watchdog.c</FilePath>
+              <FilePath>..\App\ignition_control.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -1043,6 +993,121 @@
               <FileName>heap_4.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\..\..\Third_party\FreeRTOS-10.3.1\portable\MemMang\heap_4.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>MCAL</GroupName>
+          <Files>
+            <File>
+              <FileName>adc_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\adc_manager.c</FilePath>
+            </File>
+            <File>
+              <FileName>can_driver.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\can_driver.c</FilePath>
+            </File>
+            <File>
+              <FileName>power_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\power_manager.c</FilePath>
+            </File>
+            <File>
+              <FileName>bmp280.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\bmp280.c</FilePath>
+            </File>
+            <File>
+              <FileName>ds18b20.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\ds18b20.c</FilePath>
+            </File>
+            <File>
+              <FileName>mq9_mcal.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\mq9_mcal.c</FilePath>
+            </File>
+            <File>
+              <FileName>key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\key.c</FilePath>
+            </File>
+            <File>
+              <FileName>motor_pwm_gd32.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\motor_pwm_gd32.c</FilePath>
+            </File>
+            <File>
+              <FileName>relay_power.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\relay_power.c</FilePath>
+            </File>
+            <File>
+              <FileName>watchdog.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\watchdog.c</FilePath>
+            </File>
+            <File>
+              <FileName>actor_hal.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\actor_hal.c</FilePath>
+            </File>
+            <File>
+              <FileName>i2c.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\MCAL\i2c.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>BSW::ECUAL</GroupName>
+          <Files>
+            <File>
+              <FileName>adc_ecual.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\EcuAL\adc_ecual.c</FilePath>
+            </File>
+            <File>
+              <FileName>pressure_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\EcuAL\pressure_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>gas_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\EcuAL\gas_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>temp_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\EcuAL\temp_sensor.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>BSW::Services</GroupName>
+          <Files>
+            <File>
+              <FileName>can_protocol.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\Services\can_protocol.c</FilePath>
+            </File>
+            <File>
+              <FileName>system_state.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\Services\system_state.c</FilePath>
+            </File>
+            <File>
+              <FileName>fault_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\Services\fault_manager.c</FilePath>
+            </File>
+            <File>
+              <FileName>sensor_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSW\Services\sensor_manager.c</FilePath>
             </File>
           </Files>
         </Group>
