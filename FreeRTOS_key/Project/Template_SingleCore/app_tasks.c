@@ -247,7 +247,7 @@ static void apply_state_to_actuators(void)
      * 自动退出手动模式并主动上报事件帧，随后按下方正常逻辑降温/切点火。 */
     if((s_manual_mode != 0U) && (status.state == SYSTEM_STATE_DANGER)) {
         s_manual_mode = 0U;
-        (void)can_send_ack(CAN_CAT_EVENT, CAN_EVT_MANUAL_EXIT_DANGER, CAN_ACK_OK);
+        (void)can_send_control_ack(CAN_EVT_MANUAL_EXIT_DANGER, CAN_ACK_OK);
     }
 
     /* 手动/维护模式下不覆盖执行器（风扇/水泵/制冷/加热/蜂鸣/泄压阀），
@@ -591,7 +591,7 @@ static uint8_t can_handle_control(uint8_t msg_id, const uint8_t *param)
                 return CAN_ACK_CHECK_FAIL;
             }
             /* 先回执，稍作延时确保帧发出，再复位 */
-            (void)can_send_ack(CAN_CAT_CONTROL, CAN_CTL_RESET, CAN_ACK_OK);
+            (void)can_send_control_ack(CAN_CTL_RESET, CAN_ACK_OK);
             vTaskDelay(pdMS_TO_TICKS(50U));
             NVIC_SystemReset();
         }
@@ -746,9 +746,11 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
 
 /* ============================================================
  *  can_rx_task : blocks on can4_rx_queue filled by DTM_CAN4 ISR,
- *                parses request frames (0x188) off the ISR context.
- *    Byte0=类别, Byte1=消息号, Byte2~7=配置参数。
- *    查询类只置位上报标志（响应走数据帧）；控制/配置类回 0x186 ACK。
+ *                parses request frames off the ISR context.
+ *    报文类别由 ID 区分：0x188=查询, 0x189=控制, 0x18A=配置。
+ *    帧格式：Byte0=源节点地址, Byte1=消息号, Byte2~7=参数。
+ *    只处理来自上位机的帧（Byte0=CAN_NODE_HOST），忽略自身回显。
+ *    查询类只置位上报标志（响应走 0x188）；控制/配置类回同 ID ACK。
  * ============================================================ */
 static void can_rx_task(void *pvParameters)
 {
@@ -757,37 +759,42 @@ static void can_rx_task(void *pvParameters)
 
     for( ;; ) {
         if(xQueueReceive(can4_rx_queue, &rx_msg, portMAX_DELAY) == pdTRUE) {
-            uint8_t category;
+            uint8_t src_node;
             uint8_t msg_id;
             uint8_t param[6] = {0};
             uint8_t i;
 
-            if((rx_msg.xtd != CAN_FF_STANDARD) || (rx_msg.id != CAN_ID_CMD)) {
+            if(rx_msg.xtd != CAN_FF_STANDARD) {
                 continue;
             }
 
-            category = (rx_msg.data_bytes > 0U) ? rx_msg.data[0] : 0xFFU;
-            msg_id   = (rx_msg.data_bytes > 1U) ? rx_msg.data[1] : 0U;
+            /* 仅接受上位机 -> MCU 方向的请求帧，避免处理自身响应回显 */
+            src_node = (rx_msg.data_bytes > 0U) ? (rx_msg.data[0] & 0xF0U) : 0xFFU;
+            if(src_node != CAN_NODE_HOST) {
+                continue;
+            }
+
+            msg_id = (rx_msg.data_bytes > 1U) ? rx_msg.data[1] : 0U;
             for(i = 0U; (i < 6U) && ((uint16_t)(i + 2U) < rx_msg.data_bytes); i++) {
                 param[i] = rx_msg.data[i + 2U];
             }
 
-            switch(category) {
-            case CAN_CAT_QUERY:
+            switch(rx_msg.id) {
+            case CAN_ID_QUERY:
                 (void)can_handle_query(msg_id);
                 break;
 
-            case CAN_CAT_CONTROL:
+            case CAN_ID_CONTROL:
                 {
                     uint8_t result = can_handle_control(msg_id, param);
-                    (void)can_send_ack(CAN_CAT_CONTROL, msg_id, result);
+                    (void)can_send_control_ack(msg_id, result);
                 }
                 break;
 
-            case CAN_CAT_CONFIG:
+            case CAN_ID_CONFIG:
                 {
                     uint8_t result = can_handle_config(msg_id, param);
-                    (void)can_send_ack(CAN_CAT_CONFIG, msg_id, result);
+                    (void)can_send_config_ack(msg_id, result);
                 }
                 break;
 
