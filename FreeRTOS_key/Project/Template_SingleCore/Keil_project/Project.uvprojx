@@ -1010,11 +1010,6 @@
               <FilePath>..\MCAL\can_driver.c</FilePath>
             </File>
             <File>
-              <FileName>power_manager.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\MCAL\power_manager.c</FilePath>
-            </File>
-            <File>
               <FileName>bmp280.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\MCAL\bmp280.c</FilePath>

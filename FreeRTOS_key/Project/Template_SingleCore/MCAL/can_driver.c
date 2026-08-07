@@ -132,6 +132,16 @@ void can_driver_config(can_dtm_canx_enum dtm_canx, uint32_t baudrate_khz)
     while(SET != can_sram_init_state_get(dtm_canx)) {
     }
     can_init(dtm_canx, &can_param);
+    
+    /* 配置标准帧过滤器：接受所有 ID（用于调试，实际应用中应该配置具体 ID 范围）
+     * GD32 CAN 过滤器采用 "接受列表 + 掩码" 模式，需要显式配置，否则可能默认拒绝所有帧。
+     * 这里配置过滤器 0 为 "接受所有标准帧"（ID mask = 0x000）。 */
+    filter_element.filter_type = CAN_FILTER_RANGE;  /* 范围过滤 */
+    filter_element.config = CAN_FILTER_TO_RXFIFO0;  /* 匹配的帧进入 FIFO0 */
+    filter_element.id1 = 0x000U;  /* 最小 ID = 0x000 */
+    filter_element.id2_or_mask_or_rxbuffercfg = 0x7FFU;  /* 最大 ID = 0x7FF（标准帧最大值） */
+    (void)can_filter_set(dtm_canx, CAN_FF_STANDARD, 0U, &filter_element);
+    
     can_operating_mode_enable(dtm_canx, CAN_MODE_NORMAL);
 }
 

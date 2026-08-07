@@ -151,6 +151,30 @@ ErrStatus can_protocol_send_temp_response(int16_t temp_ch0, int16_t temp_ch1,
 }
 
 /*
+ * can_protocol_send_threshold_response - 查询类温度阈值响应 (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_THRESHOLD）
+ *   Byte[2,3]  低温阈值 uint16_t，高字节在前（0.1°C 单位）
+ *   Byte[4,5]  高温阈值 uint16_t，高字节在前（0.1°C 单位）
+ *   Byte[6,7]  危险阈值 uint16_t，高字节在前（0.1°C 单位）
+ */
+ErrStatus can_protocol_send_threshold_response(uint8_t msg_id, uint16_t low_temp, uint16_t high_temp, uint16_t danger_temp)
+{
+    uint8_t data[8] = {0};
+
+    data[0] = CAN_NODE_MCU;
+    data[1] = msg_id;
+    data[2] = (uint8_t)(low_temp >> 8);
+    data[3] = (uint8_t)(low_temp & 0xFFU);
+    data[4] = (uint8_t)(high_temp >> 8);
+    data[5] = (uint8_t)(high_temp & 0xFFU);
+    data[6] = (uint8_t)(danger_temp >> 8);
+    data[7] = (uint8_t)(danger_temp & 0xFFU);
+
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
+}
+
+/*
  * can_protocol_send_control_ack - 控制类 ACK 响应 (ID: 0x189, Byte0=CAN_NODE_MCU)
  *   Byte0  源节点（0x20=MCU）
  *   Byte1  回显消息号

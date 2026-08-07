@@ -44,8 +44,14 @@ typedef void (*key_callback_t)(key_id_t key_id, void *context);
 
 /*
  * key_init
- *   初始化所有按键的 GPIO 和 EXTI 配置。
- *   必须在注册回调之前调用。
+ *   初始化所有按键的 GPIO 和 EXTI 配置，使能 EXTI 中断。
+ *   
+ *   安全调用顺序（推荐）：
+ *     1) 创建信号量/队列等 IPC 资源
+ *     2) 注册按键回调函数（key_register_callback）
+ *     3) 调用 key_init() 使能中断
+ *   
+ *   这样可以确保中断触发时回调函数和 IPC 资源都已准备好。
  */
 void key_init(void);
 

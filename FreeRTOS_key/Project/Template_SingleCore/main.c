@@ -39,7 +39,6 @@
 #include "relay_power.h"
 #include "MCAL/actor_hal.h"
 #include "key.h"
-#include "MCAL/power_manager.h"
 #include "BSW/Services/system_state.h"
 #include "BSW/Services/fault_manager.h"
 
@@ -47,10 +46,6 @@
 #define IGNITION_GPIO_RCU    RCU_GPIOF
 #define IGNITION_GPIO_PORT   GPIOF
 #define IGNITION_GPIO_PIN    GPIO_PIN_0
-
-/* ---- CAN4 RX interrupt priority (MUST be >= configMAX_SYSCALL_INTERRUPT_PRIORITY) */
-#define CAN4_RX_IRQ_PRIO     5U
-#define IGNITION_IRQ_PRIO    5U
 
 /* ---- module-local state ----------------------------------------------- */
 static uint8_t s_ignition_on = 0U;
@@ -64,6 +59,8 @@ static void ignition_gpio_init(void);
  * ============================================================ */
 int main(void)
 {
+
+    
     /* 4 bits pre-emption priority, 0 bit sub-priority (required by FreeRTOS port) */
     nvic_priority_group_set(NVIC_PRIGROUP_PRE4_SUB0);
 
@@ -88,23 +85,13 @@ void board_init(void)
 
     rcu_periph_clock_enable(RCU_PMU);
 
-    /* KEY_1 (GPIO only, no EXTI - intentionally unused now);
-     * KEY_3 (EXTI_4, IRQ EXTI4)       = ignition toggle (PF0);
-     * KEY_4 (EXTI_5, IRQ EXTI5_9)     = guard / normal mode toggle,
-     *                                    also drives relay_power along
-     *                                    with the mode. */
-    key_init();
+    /* 注意：按键初始化已移到 init_task 中，在 FreeRTOS 启动后执行，
+     * 这样可以确保信号量和回调函数都已准备好再使能中断。
+     * 参考官方 Template_SingleCore demo 的做法。 */
 
-    /* legacy ignition-button EXTI (EXTI52 -> EXTI42_101 IRQ).
-     * The pin itself is still initialised so the line stays in a
-     * defined state, but its ISR no longer drives ignition - that
-     * role belongs to KEY_3 (EXTI4 -> ignition_sem). */
-    exti_init(EXTI_52, EXTI_INTERRUPT, EXTI_TRIG_RISING);
-    exti_interrupt_enable(EXTI_52);
-    nvic_irq_enable(EXTI42_101_IRQn, IGNITION_IRQ_PRIO, 0U);
-
-    /* wake-up event line */
-    exti_init(EXTI_47, EXTI_EVENT, EXTI_TRIG_RISING);
+    /* EXTI_47 是用于 FreeRTOS tickless idle 低功耗模式的唤醒事件线。
+     * 如果不需要 tickless idle 功能，可以注释掉这一行。 */
+    /* exti_init(EXTI_47, EXTI_EVENT, EXTI_TRIG_RISING); */
 
     ignition_gpio_init();
 
@@ -137,7 +124,29 @@ void board_init(void)
 
 static void led_init(void)
 {
+    /* 初始化所有 LED */
     gd_eval_led_init(LED1);
+    gd_eval_led_init(LED2);
+    gd_eval_led_init(LED3);
+    gd_eval_led_init(LED4);
+    
+    /* 上电时测试所有 LED：全部点亮 1 秒，然后全部熄灭
+     * 这样可以验证 LED 硬件是否正常 */
+    gd_eval_led_on(LED1);
+    gd_eval_led_on(LED2);
+    gd_eval_led_on(LED3);
+    gd_eval_led_on(LED4);
+    
+    /* 简单延时 1 秒（粗略延时，仅用于测试） */
+    for(volatile uint32_t i = 0; i < 20000000; i++) {
+        __NOP();
+    }
+    
+    /* 全部熄灭 */
+    gd_eval_led_off(LED1);
+    gd_eval_led_off(LED2);
+    gd_eval_led_off(LED3);
+    gd_eval_led_off(LED4);
 }
 
 static void ignition_gpio_init(void)
@@ -153,8 +162,10 @@ void ignition_set(uint8_t on)
     s_ignition_on = (on != 0U) ? 1U : 0U;
     if(s_ignition_on != 0U) {
         gpio_bit_set(IGNITION_GPIO_PORT, IGNITION_GPIO_PIN);
+        gd_eval_led_on(LED3);   /* LED3 亮表示点火已打开 */
     } else {
         gpio_bit_reset(IGNITION_GPIO_PORT, IGNITION_GPIO_PIN);
+        gd_eval_led_off(LED3);  /* LED3 灭表示点火已关闭 */
     }
 }
 

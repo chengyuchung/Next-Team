@@ -51,8 +51,17 @@
 #define configUSE_IDLE_HOOK				0
 #define configUSE_TICK_HOOK				0
 /* tickless idle: idle 任务在长时间无就绪任务时挂起 SysTick 并 WFI，
-   配合 guard 巡检任务的 vTaskDelay() 实现低功耗定时唤醒。 */
-#define configUSE_TICKLESS_IDLE			1
+   配合 guard 巡检任务的 vTaskDelay() 实现低功耗定时唤醒。
+   
+   !!! DEBUG 注意：Tickless Idle 会导致调试器无法连接 !!!
+   - 当 FreeRTOS 进入低功耗模式时，SWD 调试接口可能被关闭
+   - 导致第二次下载时提示"调试器未连接"
+   - 必须擦除芯片后才能重新下载
+   
+   临时禁用 Tickless Idle（开发阶段）：
+   - 设置为 0 可以正常调试和下载
+   - 正式发布时可以改回 1 以降低功耗 */
+#define configUSE_TICKLESS_IDLE			0  /* 改为 0，禁用低功耗模式 */
 #define configCPU_CLOCK_HZ				( SystemCoreClock )
 #define configTICK_RATE_HZ				( ( TickType_t ) 1000 )
 #define configMAX_PRIORITIES			( 8 )

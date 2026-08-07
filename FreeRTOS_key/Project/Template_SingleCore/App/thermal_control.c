@@ -174,7 +174,11 @@ void thermal_control_update(uint32_t now_ms)
         ignition_set(0U);
     }
 
-    /* 系统状态LED指示灯控制（互斥点亮，始终反映状态机状态） */
+    /* 系统状态LED指示灯控制（互斥点亮，始终反映状态机状态）
+     * 
+     * 注意：这里控制的是硬件电路板上的状态指示灯（PE10~PE13），
+     * 与开发板板载 LED1~LED4 共用同一组引脚。CAN 调试已完成，
+     * 恢复这些调用，让硬件板上的状态灯正常显示温度状态。 */
     actor_set_channel(GPIO_CH_LED_WHITE,  (status.state == SYSTEM_STATE_LOW_TEMP) ? 1U : 0U);
     actor_set_channel(GPIO_CH_LED_GREEN,  (status.state == SYSTEM_STATE_NORMAL) ? 1U : 0U);
     actor_set_channel(GPIO_CH_LED_YELLOW, (status.state == SYSTEM_STATE_HIGH_TEMP) ? 1U : 0U);
