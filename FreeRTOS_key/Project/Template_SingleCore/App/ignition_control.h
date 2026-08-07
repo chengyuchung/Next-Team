@@ -16,12 +16,14 @@ extern "C" {
  * 
  * 设计目标 :
  *   1) 封装点火请求的处理逻辑（按键、CAN 命令）；
- *   2) 集成安全检查（DANGER 状态锁定）；
+ *   2) 集成安全检查（Guard 模式、DANGER 状态锁定）；
  *   3) 提供统一的点火控制接口。
  * 
  * 架构说明 :
  *   - 点火请求来源：KEY_3 按键（通过信号量）、CAN 命令
- *   - 安全保护：通过 thermal_control 模块查询点火锁定状态
+ *   - 安全保护：
+ *     * Guard 模式下禁止点火（继电器断电，PF0 无意义）
+ *     * DANGER 状态下禁止点火（热管理安全边界）
  *   - 硬件控制：通过 main.h 的 ignition_set/get 操作 GPIO
  * ============================================================================
  */
@@ -46,7 +48,9 @@ void ignition_control_init(SemaphoreHandle_t ignition_sem);
  * 
  * 执行流程 :
  *   1. 阻塞等待点火信号量（KEY_3 按键触发）
- *   2. 检查点火锁定状态（DANGER 状态下禁止点火）
+ *   2. 检查点火锁定状态：
+ *      - Guard 模式下禁止点火（继电器断电，PF0 无意义）
+ *      - DANGER 状态下禁止点火（热管理安全边界）
  *   3. 如果未锁定，则切换点火状态
  */
 void ignition_control_task(void *pvParameters);
@@ -58,7 +62,7 @@ void ignition_control_task(void *pvParameters);
  * 输出参数 : 无
  * 返 回 值 :
  *   - CAN_ACK_OK : 点火成功
- *   - CAN_ACK_REJECTED : 点火被拒绝（DANGER 状态锁定）
+ *   - CAN_ACK_REJECTED : 点火被拒绝（Guard 模式或 DANGER 状态锁定）
  * 
  * 注意事项 :
  *   - 此函数在 can_rx_task 上下文调用

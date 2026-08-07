@@ -9,7 +9,6 @@
             - EXTI4        : KEY_3 -> ignition_sem (binary semaphore; ignition toggle)
             - EXTI10_15    : KEY_1 -> DISABLED (GPIO mode only)
             - EXTI5_9      : KEY_4 -> guard_key1_sem (toggle guard / low-power patrol mode)
-            - EXTI42_101   : legacy ignition EXTI (EXTI52) -> stub, only clears flag
             - DTM_CAN4_INT0 : CAN4 RX -> can4_rx_queue
 */
 
@@ -42,6 +41,7 @@ OF SUCH DAMAGE.
 
 #include "gd32a7xx_it.h"
 #include "gd32a7xx_libopt.h"
+#include "gd32a712_evb.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -143,12 +143,18 @@ void DebugMon_Handler(void)
  *           
  *  解耦改进：中断处理不再直接操作 ignition_sem，而是调用
  *           MCAL 层的 key_isr_handler()，由回调机制通知应用层。
+ *           
+ *  NOTE: 按照官方 demo 规范（03_EXTI_Key_Interrupt_mode），
+ *        先执行中断处理逻辑，后清除中断标志位，避免中断丢失。
+ *        
+ *  DEBUG: KEY_3 按下时 LED2 短暂点亮 50ms，用于调试按键响应
+ *         （需要配合任务层延时后熄灭，这里仅在中断中点亮）
  * ============================================================ */
 void EXTI4_IRQHandler(void)
 {
     if(RESET != exti_interrupt_flag_get(EXTI_4)) {
-        exti_interrupt_flag_clear(EXTI_4);
         key_isr_handler(KEY_ID_3);
+        exti_interrupt_flag_clear(EXTI_4);
     }
 }
 
@@ -176,28 +182,15 @@ void EXTI10_15_IRQHandler(void)
  *           
  *  解耦改进：中断处理不再直接操作 guard_key1_sem，而是调用
  *           MCAL 层的 key_isr_handler()，由回调机制通知应用层。
+ *           
+ *  NOTE: 按照官方 demo 规范（03_EXTI_Key_Interrupt_mode），
+ *        先执行中断处理逻辑，后清除中断标志位，避免中断丢失。
  * ============================================================ */
 void EXTI5_9_IRQHandler(void)
 {
     if(RESET != exti_interrupt_flag_get(EXTI_5)) {
-        exti_interrupt_flag_clear(EXTI_5);
         key_isr_handler(KEY_ID_4);
-    }
-}
-
-/* ============================================================
- *  Legacy Ignition EXTI  (EXTI52, IRQ: EXTI42_101)
- *  Project: ignition is now driven by KEY_3 (EXTI4 -> ignition_sem),
- *           so this external pin is no longer used to toggle
- *           ignition. We keep the EXTI initialised (so the line
- *           stays in a defined state) but the ISR is intentionally
- *           reduced to "clear the pending flag, do nothing else".
- *           Do NOT toggle ignition here.
- * ============================================================ */
-void EXTI42_101_IRQHandler(void)
-{
-    if(SET == exti_interrupt_flag_get(EXTI_52)) {
-        exti_interrupt_flag_clear(EXTI_52);
+        exti_interrupt_flag_clear(EXTI_5);
     }
 }
 

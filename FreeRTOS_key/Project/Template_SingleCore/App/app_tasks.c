@@ -74,7 +74,7 @@ void vApplicationMallocFailedHook(void)
  *    - actor_hal.c         : GPIO 执行器统一接口（制冷/加热/蜂鸣器/排气阀）
  *    - adc_manager.c       : ADC 多通道管理（压力/气体传感器）
  *    - can_driver.c        : CAN 驱动封装
- *    - power_manager.c     : 电源管理（relay + tickless idle）
+ *    - key.c               : 按键中断管理（KEY_3 点火 / KEY_4 guard 模式）
  *
  * 2. BSW/EcuAL (ECU Abstraction Layer) - ECU 抽象层
  *    - temp_sensor.c       : DS18B20 温度传感器驱动
@@ -110,7 +110,6 @@ void vApplicationMallocFailedHook(void)
 #include "relay_power.h"
 #include "MCAL/actor_hal.h"
 #include "key.h"
-#include "MCAL/power_manager.h"
 #include "BSW/Services/system_state.h"
 #include "BSW/Services/fault_manager.h"
 #include "BSW/Services/sensor_manager.h"
@@ -119,11 +118,14 @@ void vApplicationMallocFailedHook(void)
 #include "App/ignition_control.h"
 
 /* ---- task priorities (configMAX_PRIORITIES == 8) ----------------------
+ * INIT_TASK 优先级必须高于所有应用任务，确保初始化完成后再让应用任务运行，
+ * 避免 guard_task 在 s_guard_mode_active 设置前就抢占并进入"等待进入 guard"的分支。
+ * 
  * TEMP_TASK 优先级高于 APP_TASK：DS18B20 的 1-Wire 位时序对延时极敏感
  * （读采样窗口 ~15us），若被 app_task 抢占会破坏位时序导致 CRC 失败。
  * 让温度任务优先级更高，可保证它短促的位操作突发不被 app_task 打断；
  * 而 750ms 的转换等待用 vTaskDelay 让出 CPU，因此不会饿死 app_task。 */
-#define INIT_TASK_PRIO       ( tskIDLE_PRIORITY + 1 )
+#define INIT_TASK_PRIO       ( tskIDLE_PRIORITY + 4 )
 #define APP_TASK_PRIO        ( tskIDLE_PRIORITY + 2 )
 #define GUARD_TASK_PRIO      ( tskIDLE_PRIORITY + 2 )
 #define TEMP_TASK_PRIO       ( tskIDLE_PRIORITY + 3 )
@@ -229,10 +231,14 @@ static void key4_guard_callback(key_id_t key_id, void *context)
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     
     (void)key_id;
-    if(sem != NULL) {
-        xSemaphoreGiveFromISR(sem, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    
+    /* 检查信号量是否有效（防止在 FreeRTOS 启动前中断触发） */
+    if(sem == NULL) {
+        return;
     }
+    
+    xSemaphoreGiveFromISR(sem, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 /* ---- CAN ISR helper (called from gd32a7xx_it.c) ----------------------- */
@@ -290,6 +296,14 @@ static void init_task(void *pvParameters)
     (void)key_register_callback(KEY_ID_3, key3_ignition_callback, (void *)s_ignition_sem);
     (void)key_register_callback(KEY_ID_4, key4_guard_callback, (void *)s_guard_key1_sem);
 
+    /* 按键初始化：参考官方 Template_SingleCore demo，在 FreeRTOS 启动后、
+     * 信号量创建后、回调注册后再初始化按键，这样可以确保中断触发时
+     * 所有资源都已准备好。
+     * KEY_1 (GPIO only, no EXTI - intentionally unused now);
+     * KEY_3 (EXTI_4, IRQ EXTI4)       = ignition toggle (PF0);
+     * KEY_4 (EXTI_5, IRQ EXTI5_9)     = guard / normal mode toggle. */
+    key_init();
+
     /* create application tasks */
     TaskHandle_t app_task_handle = NULL;
     TaskHandle_t temp_task_handle = NULL;
@@ -302,12 +316,15 @@ static void init_task(void *pvParameters)
     /* 初始化低功耗模式管理模块 */
     power_mode_init(app_task_handle, temp_task_handle);
 
-    /* Boot default is guard mode: relay OFF, app_task suspended,
-     * guard_task already inside the patrol loop. The first KEY_4 press
-     * wakes guard_task out of the inner semaphore and exits guard.
-     * We do this AFTER creating the tasks so power_mode_enter_guard() can use the
-     * already-stored task handles, and BEFORE deleting ourselves
-     * so the kernel is fully up when we touch its state. */
+    /* Boot default is guard mode: relay OFF, app_task suspended.
+     * 
+     * CRITICAL: 必须在 guard_task 开始运行前就设置 s_guard_mode_active = 1，
+     * 否则 guard_task 会进入"等待进入 guard"的外层等待，导致第一次 KEY_4
+     * 只是让它进入巡检循环，第二次 KEY_4 才退出 guard。
+     * 
+     * 通过将 INIT_TASK_PRIO 设置为高于所有应用任务，确保此处执行完毕后
+     * guard_task 才开始运行，此时它会检测到 s_guard_mode_active == 1，
+     * 直接跳过外层等待进入巡检循环。第一次 KEY_4 就能正确退出 guard。 */
     power_mode_enter_guard();
 
     vTaskDelete(NULL);
@@ -469,6 +486,7 @@ static void guard_task(void *pvParameters)
              * sensors to come up, then keep sampling/driving actuators
              * for as long as the state machine says "something is wrong". */
             relay_power_on();
+            gd_eval_led_on(LED4);  /* 巡检窗口开始，点亮 LED4 指示"临时工作中" */
             vTaskDelay(pdMS_TO_TICKS(GUARD_POWER_ON_SETTLE_MS));
 
             {
@@ -559,17 +577,25 @@ static void guard_task(void *pvParameters)
                  * left off, and actuators stay driven. */
                 if((aborted == 0U) && (in_handling == 0U)) {
                     relay_power_off();
+                    gd_eval_led_off(LED4);  /* 巡检窗口结束（恢复长睡眠），熄灭 LED4 */
                 }
 
                 if(aborted != 0U) {
                     /* User pressed KEY_4 to leave guard mode: drop out
                      * of the patrol and let power_mode_exit_guard() restore power. */
+                    gd_eval_led_off(LED4);  /* 用户中断巡检退出 guard，熄灭 LED4 */
                     break;
                 }
             }
         }
 
         power_mode_exit_guard();
+
+        /* 兜底熄灭 LED4：如果上一轮巡检结束时仍处于 in_handling（PG0 保持
+         * 通电、LED4 保持点亮，等待下一轮巡检继续处理），用户此时按 KEY_4
+         * 会在外层循环顶部直接 break，不会经过巡检内部的熄灭逻辑，
+         * 所以这里统一兜底，确保退出 guard 后 LED4 一定是灭的。 */
+        gd_eval_led_off(LED4);
     }
 }
 

@@ -47,9 +47,10 @@ extern "C" {
 #define CAN_QRY_ENV     0x00U
 #define CAN_QRY_STA     0x01U
 #define CAN_QRY_SYS     0x02U
-#define CAN_QRY_FLT     0x03U
-#define CAN_QRY_TEMP    0x04U
-#define CAN_QRY_TEMP_HI 0x05U
+#define CAN_QRY_FLT       0x03U
+#define CAN_QRY_TEMP      0x04U
+#define CAN_QRY_TEMP_HI   0x05U
+#define CAN_QRY_THRESHOLD 0x06U
 
 /* 保留字节填充值 */
 #define CAN_RSVD_FILL   0xCCU
@@ -126,6 +127,12 @@ typedef struct {
     uint8_t press_sensor;
 } can_fault_data_t;
 
+typedef struct {
+    uint16_t low_temp_threshold_tenths;
+    uint16_t high_temp_threshold_tenths;
+    uint16_t danger_temp_threshold_tenths;
+} can_threshold_data_t;
+
 /*
  * CAN 协议层接口 - 查询类响应发送
  */
@@ -134,6 +141,7 @@ ErrStatus can_protocol_send_state_response(uint8_t msg_id, uint8_t fan_duty, uin
 ErrStatus can_protocol_send_system_state_response(uint8_t msg_id, uint8_t level);
 ErrStatus can_protocol_send_fault_response(uint8_t cooler_mask, uint8_t heater_mask, uint8_t gas_sensor, uint8_t gate_fault, uint8_t fan_fault, uint8_t pump_fault, uint8_t press_sensor);
 ErrStatus can_protocol_send_temp_response(int16_t temp_ch0, int16_t temp_ch1, int16_t temp_ch2, int16_t temp_ch3);
+ErrStatus can_protocol_send_threshold_response(uint8_t msg_id, uint16_t low_temp, uint16_t high_temp, uint16_t danger_temp);
 
 /*
  * CAN 协议层接口 - 控制类/配置类 ACK 响应

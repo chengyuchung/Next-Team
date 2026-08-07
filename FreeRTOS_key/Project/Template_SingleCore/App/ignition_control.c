@@ -1,5 +1,6 @@
 #include "ignition_control.h"
 #include "App/thermal_control.h"
+#include "App/power_mode.h"
 #include "BSW/Services/can_protocol.h"
 #include "main.h"
 #include "FreeRTOS.h"
@@ -31,9 +32,11 @@ void ignition_control_task(void *pvParameters)
 
     for( ;; ) {
         if(xSemaphoreTake(s_ignition_sem, portMAX_DELAY) == pdTRUE) {
-            /* DANGER 状态下点火被锁定，忽略此次按键请求，
-             * 保证点火始终保持在强制关闭状态。 */
-            if(thermal_control_is_ignition_locked() == 0U) {
+            /* Guard 模式下禁止点火切换：guard 模式下继电器断电（PG0 低），
+             * PF0 的电平失去意义，且不应该让用户误以为可以点火。
+             * DANGER 状态下点火也被锁定，忽略此次按键请求。 */
+            if((power_mode_is_guard_active() == 0U) 
+               && (thermal_control_is_ignition_locked() == 0U)) {
                 ignition_set((uint8_t)!ignition_get());
             }
         }
@@ -42,8 +45,9 @@ void ignition_control_task(void *pvParameters)
 
 uint8_t ignition_control_handle_ignite(void)
 {
-    /* DANGER 锁定时禁止打火 */
-    if(thermal_control_is_ignition_locked() != 0U) {
+    /* Guard 模式或 DANGER 锁定时禁止打火 */
+    if((power_mode_is_guard_active() != 0U)
+       || (thermal_control_is_ignition_locked() != 0U)) {
         return CAN_ACK_REJECTED;
     }
     ignition_set(1U);

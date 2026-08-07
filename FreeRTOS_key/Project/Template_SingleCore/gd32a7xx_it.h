@@ -71,8 +71,6 @@ void EXTI5_9_IRQHandler(void);
 void EXTI10_15_IRQHandler(void);
 /* this function handles external line 4 interrupt request (KEY_3, power key) */
 void EXTI4_IRQHandler(void);
-/* this function handles external lines 42 to 101 interrupt request (ignition) */
-void EXTI42_101_IRQHandler(void);
 /* this function handles DTM_CAN4 INT0 interrupt request (CAN4 RX) */
 void DTM_CAN4_INT0_IRQHandler(void);
 

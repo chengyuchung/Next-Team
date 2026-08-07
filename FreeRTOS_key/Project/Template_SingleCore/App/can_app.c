@@ -3,6 +3,7 @@
 #include "can_protocol.h"
 #include "system_state.h"
 #include "../BSW/EcuAL/temp_sensor.h"
+#include "main.h"
 
 /*
  * ============================================================================
@@ -19,12 +20,13 @@ static volatile uint8_t s_upload_state_flag = 0U;
 static volatile uint8_t s_upload_system_state_flag = 0U;
 static volatile uint8_t s_upload_fault_flag = 0U;
 static volatile uint8_t s_upload_temp_flag = 0U;
+static volatile uint8_t s_upload_threshold_flag = 0U;
 
 void can_app_init(void)
 {
     can_driver_gpio_config();
     can_driver_config(DTM_CAN4, 500U);
-    can_driver_enable_rx_interrupt(DTM_CAN4, 2U);
+    can_driver_enable_rx_interrupt(DTM_CAN4, CAN4_RX_IRQ_PRIO);
 }
 
 ErrStatus can_app_handle_query(uint8_t msg_id)
@@ -44,6 +46,9 @@ ErrStatus can_app_handle_query(uint8_t msg_id)
         break;
     case CAN_QRY_TEMP:
         s_upload_temp_flag = 1U;
+        break;
+    case CAN_QRY_THRESHOLD:
+        s_upload_threshold_flag = 1U;
         break;
     default:
         return ERROR;
@@ -76,6 +81,11 @@ void can_app_process_pending_uploads(void)
     if(s_upload_temp_flag != 0U) {
         s_upload_temp_flag = 0U;
         (void)can_app_upload_temp();
+    }
+
+    if(s_upload_threshold_flag != 0U) {
+        s_upload_threshold_flag = 0U;
+        (void)can_app_upload_threshold();
     }
 }
 
@@ -131,4 +141,12 @@ ErrStatus can_app_upload_temp(void)
     int16_t temp_ch3 = input.zone_temp_valid[3] ? input.zone_temperature_tenths[3] : 0;
 
     return can_protocol_send_temp_response(temp_ch0, temp_ch1, temp_ch2, temp_ch3);
+}
+
+ErrStatus can_app_upload_threshold(void)
+{
+    return can_protocol_send_threshold_response(CAN_QRY_THRESHOLD,
+                                                 g_low_temp_threshold_tenths,
+                                                 g_high_temp_threshold_tenths,
+                                                 g_danger_temp_threshold_tenths);
 }

@@ -1,6 +1,7 @@
 #include "key.h"
 #include "gd32a7xx.h"
 #include "gd32a712_evb.h"
+#include "main.h"
 
 /*
  * ============================================================================
@@ -26,7 +27,7 @@ void key_init(void)
     /* KEY_1 is no longer used in this project (see gd32a7xx_it.c note).
      * Initialize in GPIO mode only so the pin is in a defined state,
      * no EXTI / NVIC entry for KEY_1. */
-    gd_eval_key_init(KEY_1, KEY_MODE_GPIO);
+    //gd_eval_key_init(KEY_1, KEY_MODE_GPIO);
 
     /* KEY_3 toggles ignition (PF0). Library sets up EXTI4 / NVIC
      * EXTI4_IRQn automatically when KEY_MODE_EXTI; the ISR in
@@ -39,6 +40,18 @@ void key_init(void)
      * calls key_isr_handler(KEY_ID_4) instead of directly giving
      * guard_key1_sem. */
     gd_eval_key_init(KEY_4, KEY_MODE_EXTI);
+
+    /* CRITICAL: BSP 默认设置按键中断优先级为 2，虽然已经符合 FreeRTOS 要求
+     * (>= configMAX_SYSCALL_INTERRUPT_PRIORITY = 2)，但为了确保按键响应优先级，
+     * 手动重新设置为优先级 KEY_IRQ_PRIO（与 CAN 同级，确保用户交互能快速响应）。
+     * 
+     * 注意：优先级 2 已经可以安全调用 xSemaphoreGiveFromISR 等 FreeRTOS API。
+     *      数字越小优先级越高，按键需要高优先级以避免被其他中断阻塞。
+     *      
+     * IMPORTANT: 参考官方 Template_SingleCore demo，key_init() 现在在 init_task 中调用
+     *            （即 FreeRTOS 启动后、信号量创建后、回调注册后），所以可以直接使能中断。 */
+    nvic_irq_enable(EXTI4_IRQn, KEY_IRQ_PRIO, 0U);
+    nvic_irq_enable(EXTI5_9_IRQn, KEY_IRQ_PRIO, 0U);
 }
 
 uint8_t key_register_callback(key_id_t key_id, key_callback_t callback, void *context)

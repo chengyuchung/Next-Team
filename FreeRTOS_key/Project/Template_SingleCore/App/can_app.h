@@ -143,6 +143,17 @@ ErrStatus can_app_upload_fault(void);
  */
 ErrStatus can_app_upload_temp(void);
 
+/*
+ * 函数名称 : can_app_upload_threshold
+ * 功能描述 : 上报当前生效的温度阈值配置（低温/高温/危险阈值）。
+ * 输入参数 : 无
+ * 输出参数 : 无
+ * 返 回 值 :
+ *   - SUCCESS : 发送成功
+ *   - ERROR   : 发送失败
+ */
+ErrStatus can_app_upload_threshold(void);
+
 /* 兼容旧代码的宏定义 */
 #define can_handle_query               can_app_handle_query
 #define can_upload_env                 can_app_upload_env
@@ -150,6 +161,7 @@ ErrStatus can_app_upload_temp(void);
 #define can_upload_system_state        can_app_upload_system_state
 #define can_upload_fault               can_app_upload_fault
 #define can_upload_temp                can_app_upload_temp
+#define can_upload_threshold           can_app_upload_threshold
 #define can_process_pending_uploads    can_app_process_pending_uploads
 
 /* 直接暴露协议层函数（用于 ACK 响应） */

@@ -57,7 +57,9 @@ void power_mode_enter_guard(void)
                          * 但此时 PG0 已切断，PF0 的电平失去意义，
                          * 仅作软件状态同步 */
 
-    gd_eval_led_off(LED1);
+    /* LED 指示：Guard 模式 */
+    gd_eval_led_off(LED1);  /* LED1 灭表示系统未在正常工作 */
+    gd_eval_led_on(LED2);   /* LED2 亮表示进入 Guard 模式 */
 }
 
 void power_mode_exit_guard(void)
@@ -79,6 +81,10 @@ void power_mode_exit_guard(void)
     if(s_temp_task_handle != NULL) {
         vTaskResume(s_temp_task_handle);
     }
+
+    /* LED 指示：正常模式 */
+    gd_eval_led_on(LED1);   /* LED1 亮表示系统正常工作 */
+    gd_eval_led_off(LED2);  /* LED2 灭表示退出 Guard 模式 */
 }
 
 uint8_t power_mode_is_guard_active(void)
