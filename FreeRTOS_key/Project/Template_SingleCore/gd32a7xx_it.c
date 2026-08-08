@@ -62,13 +62,6 @@ extern QueueHandle_t     can4_rx_queue;
 /* guard mode flag from app_tasks.c */
 extern volatile uint8_t s_guard_mode_active;
 
-/* 
- * guard_key1_sem_give_from_isr
- *   提供给 CAN ISR 使用的接口，用于在 guard 模式下唤醒 guard_task。
- *   由 app_tasks.c 实现，避免 ISR 直接访问内部信号量。
- */
-extern void guard_key1_sem_give_from_isr(void);
-
 /* ============================================================
  *  Cortex-M Fault Handlers (default: trap)
  * ============================================================ */
@@ -198,9 +191,11 @@ void EXTI5_9_IRQHandler(void)
  *  CAN4 RX (DTM_CAN4 INT0 line)
  *  Project: enqueue the received frame, let a task parse it.
  *           Do NOT call can_handle_cmd() inside the ISR.
- *           If guard mode is active, the RX itself is treated as
- *           a wake event (any incoming traffic implies the bus
- *           wants the device responsive again).
+ *           Guard 模式下不再对任意报文"盲醒"：是否退出 guard 完全由
+ *           can_rx_task 解析出 CAN_CTL_POWER_ON 控制命令后决定
+ *           （见 app_tasks.c 的 can_handle_control()）。can_rx_task 本身
+ *           未被挂起，因此 guard 模式下查询/控制类报文仍能被正常接收
+ *           和响应，只是不再触发继电器上电/退出巡检。
  *  Queue element type is can_receive_message_struct, matching
  *  can4_rx_queue created in main.c / consumed by can_rx_task.
  * ============================================================ */
@@ -229,9 +224,6 @@ void DTM_CAN4_INT0_IRQHandler(void)
 
         if(NULL != can4_rx_queue) {
             xQueueSendFromISR(can4_rx_queue, &rx_frame, &xHigherPriorityTaskWoken);
-        }
-        if(s_guard_mode_active != 0U) {
-            guard_key1_sem_give_from_isr();
         }
         portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }

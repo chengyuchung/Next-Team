@@ -25,7 +25,9 @@
 
              KEY_3 -> 点火切换 (PF0)，guard 模式下忽略；
              KEY_4 -> guard / 正常模式切换，也用于把系统从 tickless idle 唤醒；
-             CAN RX -> can_rx_task；guard 模式下同时唤醒 guard_task。
+             CAN RX -> can_rx_task 解析报文；guard 模式下只有收到
+                       CAN_CTL_POWER_ON 控制命令才会唤醒 guard_task 退出
+                       guard（其余报文正常收发 ACK，但不影响低功耗状态）。
 */
 
 #include "gd32a7xx.h"
@@ -152,8 +154,21 @@ void vApplicationMallocFailedHook(void)
 
 /* 运行时可配置参数定义（通过 CAN 0x20 配置类命令动态修改） */
 uint32_t g_app_task_period_ms         = APP_TASK_PERIOD_MS;
-uint32_t g_guard_sleep_interval_ms    = 15U * 1000U;
-uint32_t g_guard_handling_budget_ms   = 30U * 1000U;
+uint32_t g_guard_sleep_interval_ms    = 15U * 1000U;  /* 自适应长睡眠的基准值/上限参考 */
+uint32_t g_guard_handling_budget_ms   = 30U * 1000U;  /* 巡检异常处理后，NORMAL 持续确认时长 */
+
+/* 自适应长睡眠时长：guard_task 每次全新进入 guard 模式时，从
+ * g_guard_sleep_interval_ms 这个基准值重新开始；此后每完成一次巡检唤醒：
+ *   - 本轮巡检期间只要出现过非 NORMAL 状态 -> 下一轮睡眠时长缩短 10%
+ *     （连续异常会持续缩短，越危险醒得越勤）；
+ *   - 本轮巡检从头到尾都是 NORMAL           -> 下一轮睡眠时长增加 20%
+ *     （逐步恢复到基准，且无上限——按需求只约束下限）；
+ *   - 下限固定为 GUARD_ADAPTIVE_SLEEP_MIN_MS，不受 g_guard_sleep_interval_ms
+ *     配置值影响。 */
+#define GUARD_ADAPTIVE_SLEEP_MIN_MS   (  5U * 1000U )
+#define GUARD_ADAPTIVE_SHRINK_PCT     ( 90U )   /* 缩短 10%：乘以 90% */
+#define GUARD_ADAPTIVE_GROW_PCT       ( 120U )  /* 增加 20%：乘以 120% */
+static uint32_t s_guard_current_sleep_interval_ms = 15U * 1000U;
 
 /* ---- guard (低功耗巡检) mode timing ------------------------------------
  * KEY_4 切换进入/退出 guard 巡检模式：
@@ -171,9 +186,13 @@ uint32_t g_guard_handling_budget_ms   = 30U * 1000U;
  *   - 巡检内部按状态机决定行为：
  *       state == NORMAL           -> 巡检结束，关电，进入下一轮长睡；
  *       state == PRE/WARNING/DANGER -> 持续执行状态机分支 (风扇/泵/加热/制冷/
- *                                      蜂鸣/门)；最长可再延长 g_guard_handling_budget_ms；
- *   - 唤醒源：KEY_4 任意时刻按下立刻退出 guard；CAN4 收到任意报文也
- *     会立即唤醒 guard_task；KEY_3 只翻点火，不参与 guard 唤醒。 */
+ *                                      蜂鸣/门)；持续处理直到回到 NORMAL 并保持
+ *                                      g_guard_handling_budget_ms 时长才允许断电，
+ *                                      不设超时上限（处理到底）；
+ *   - 唤醒源：KEY_4 任意时刻按下立刻退出 guard；CAN 侧仅当收到
+ *     CAN_CTL_POWER_ON 控制命令时才会退出 guard（can_handle_control()
+ *     内部按当前模式触发 s_guard_key1_sem，不是 ISR 里盲醒）；
+ *     KEY_3 只翻点火，不参与 guard 唤醒。 */
 #define GUARD_PATROL_DURATION_MS    (  5U * 1000U )  /* 每次唤醒后的巡检持续时长 */
 #define GUARD_PATROL_PERIOD_MS      ( APP_TASK_PERIOD_MS ) /* 巡检内部采样周期，与 app_task 保持一致 */
 #define GUARD_POWER_ON_SETTLE_MS   ( 50U )          /* PG0 继电器上电到外设可用的稳定延时 */
@@ -184,10 +203,11 @@ uint32_t g_guard_handling_budget_ms   = 30U * 1000U;
 static SemaphoreHandle_t s_ignition_sem   = NULL;
 QueueHandle_t     can4_rx_queue  = NULL;
 
-/* given by key callback (KEY_4) on every press, and additionally
- * by DTM_CAN4 INT0 (CAN RX) while guard mode is active. guard_task blocks
- * on it with a timeout so the idle task can enter tickless sleep, and any
- * give wakes guard_task immediately to enter or exit guard mode.
+/* given by key callback (KEY_4) on every press, and additionally by
+ * can_handle_control() when a CAN_CTL_POWER_ON command is received while
+ * guard mode is active (see the CAN_CTL_POWER_ON case below). guard_task
+ * blocks on it with a timeout so the idle task can enter tickless sleep,
+ * and any give wakes guard_task immediately to enter or exit guard mode.
  * KEY_3 (EXTI4) drives s_ignition_sem instead and does not participate
  * in guard wakeup. */
 static SemaphoreHandle_t s_guard_key1_sem = NULL;
@@ -239,17 +259,6 @@ static void key4_guard_callback(key_id_t key_id, void *context)
     
     xSemaphoreGiveFromISR(sem, &xHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-}
-
-/* ---- CAN ISR helper (called from gd32a7xx_it.c) ----------------------- */
-void guard_key1_sem_give_from_isr(void)
-{
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    
-    if(s_guard_key1_sem != NULL) {
-        xSemaphoreGiveFromISR(s_guard_key1_sem, &xHigherPriorityTaskWoken);
-        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-    }
 }
 
 /* ============================================================
@@ -440,10 +449,9 @@ static void temp_task(void *pvParameters)
  *      the board is powered back off and we go back to the long sleep;
  *    - if any non-NORMAL state appears (LOW_TEMP / HIGH_TEMP /
  *      DANGER), the board stays powered and actuators stay driven
- *      for up to g_guard_handling_budget_ms, sampling every
- *      GUARD_PATROL_PERIOD_MS, until we either get back to NORMAL or
- *      the budget expires; in the latter case the next patrol
- *      continues where this one left off with PG0 still on;
+ *      until the state returns to NORMAL and remains stable for
+ *      g_guard_handling_budget_ms, sampling every GUARD_PATROL_PERIOD_MS.
+ *      No timeout: keeps handling until truly safe.
  *    - KEY_4 pressed again (guard_key1_sem) aborts immediately, either
  *      out of the sleep, out of an in-progress patrol, or out of the
  *      handling window, and hands control back to app_task.
@@ -456,9 +464,108 @@ static void temp_task(void *pvParameters)
  *         the inner semaphore and exits guard mode (normal operation).
  *         From then on every KEY_4 press toggles guard mode.
  * ============================================================ */
+/*
+ * guard_update_handling_state
+ *   巡检/延长处理窗口内每轮调用一次，推进 in_handling 状态：
+ *     - 读到非 NORMAL：立即（重新）置 in_handling=1，清空"NORMAL 持续
+ *       确认"计时；
+ *     - 读到 NORMAL 但当前不在 in_handling：本轮至今未出现异常，直接
+ *       维持 in_handling=0，无需确认；
+ *     - 读到 NORMAL 且当前处于 in_handling：开始/继续累计连续 NORMAL
+ *       时长，只有连续满 g_guard_handling_budget_ms 才真正清 in_handling，
+ *       否则继续保持 in_handling=1（防止单次读数刚好回落到 NORMAL 就被
+ *       当成安全立刻断电，而下一刻又反弹回危险状态）。
+ */
+static void guard_update_handling_state(uint8_t *in_handling,
+                                         uint8_t *normal_confirm_active,
+                                         TickType_t *normal_confirm_start,
+                                         uint8_t *had_abnormal)
+{
+    TickType_t now_tick = xTaskGetTickCount();
+
+    if(system_state_get_state() != SYSTEM_STATE_NORMAL) {
+        *normal_confirm_active = 0U;
+        *in_handling = 1U;
+        *had_abnormal = 1U;  /* 本轮巡检出现过异常，供自适应睡眠时长使用 */
+        return;
+    }
+
+    /* state == NORMAL */
+    if(*in_handling == 0U) {
+        return; /* 本轮巡检至今未出现异常，无需确认 */
+    }
+
+    if(*normal_confirm_active == 0U) {
+        *normal_confirm_active = 1U;
+        *normal_confirm_start  = now_tick;
+        return;
+    }
+
+    if((now_tick - *normal_confirm_start) >= pdMS_TO_TICKS(g_guard_handling_budget_ms)) {
+        *in_handling = 0U;
+        *normal_confirm_active = 0U;
+    }
+}
+
+/*
+ * guard_adjust_sleep_interval
+ *   每完成一次巡检（无论是否触发过 in_handling）调用一次，按本轮巡检是否
+ *   出现过非 NORMAL 状态来调整下一轮长睡眠时长：
+ *     - had_abnormal != 0：缩短 10%（乘以 90%），下限钳位到
+ *       GUARD_ADAPTIVE_SLEEP_MIN_MS（5s），越危险醒得越勤；
+ *     - had_abnormal == 0：增加 20%（乘以 120%），不设上限——只要连续
+ *       多轮都正常，睡眠间隔会持续变长，直至用户按 KEY_4 退出 guard
+ *       或再次出现异常。
+ *   *90/100 或 *120/100 之后大概率不是 1000 的整数倍（例如 36000*90/100=
+ *   32400ms=32.4s），四舍五入到最近的整数秒后再存回，保证任意时刻
+ *   s_guard_current_sleep_interval_ms 都是 1000 的整数倍（整数秒），不会
+ *   出现 32.4s 这种带小数的睡眠时长。
+ *   用 uint64_t 中间量避免 *120/100 在大数值下溢出 uint32_t。
+ */
+/*
+ * app_tasks_get_guard_current_sleep_ms
+ *   对外暴露 s_guard_current_sleep_interval_ms 的只读访问接口，供
+ *   can_app.c 的 CAN_QRY_GUARD_SLEEP 查询响应读取。s_guard_current_sleep_interval_ms
+ *   是普通 uint32_t（非 volatile），但读取本身是单条 32 位对齐的
+ *   load 指令，在 Cortex-M 上具有原子性，can_rx_task 里偶尔读到
+ *   guard_task 正在写入前/后的值也不会造成撕裂读，可接受。
+ */
+uint32_t app_tasks_get_guard_current_sleep_ms(void)
+{
+    return s_guard_current_sleep_interval_ms;
+}
+
+static void guard_adjust_sleep_interval(uint8_t had_abnormal)
+{
+    uint64_t raw_ms;
+    uint64_t new_interval_ms;
+
+    if(had_abnormal != 0U) {
+        raw_ms = ((uint64_t)s_guard_current_sleep_interval_ms
+                  * GUARD_ADAPTIVE_SHRINK_PCT) / 100ULL;
+    } else {
+        raw_ms = ((uint64_t)s_guard_current_sleep_interval_ms
+                  * GUARD_ADAPTIVE_GROW_PCT) / 100ULL;
+    }
+
+    /* 四舍五入到最近的整数秒：小数部分 >= 0.5s 向上取整，否则向下取整。 */
+    new_interval_ms = ((raw_ms + 500ULL) / 1000ULL) * 1000ULL;
+
+    if((had_abnormal != 0U) && (new_interval_ms < GUARD_ADAPTIVE_SLEEP_MIN_MS)) {
+        new_interval_ms = GUARD_ADAPTIVE_SLEEP_MIN_MS;
+    }
+
+    s_guard_current_sleep_interval_ms = (uint32_t)new_interval_ms;
+}
+
 static void guard_task(void *pvParameters)
 {
     (void)pvParameters;
+
+    /* 覆盖上电即处于 guard 模式的场景（init_task 已调用
+     * power_mode_enter_guard()，此时 s_guard_mode_active 已是 1，
+     * 下面第一次外层判断会被跳过，所以在循环外先初始化一次）。 */
+    s_guard_current_sleep_interval_ms = g_guard_sleep_interval_ms;
 
     for( ;; ) {
             /* If guard is already active (we entered it from init_task
@@ -473,12 +580,19 @@ static void guard_task(void *pvParameters)
             }
 
             power_mode_enter_guard();
+
+            /* 每次全新进入 guard 模式，自适应睡眠时长都从配置基准值
+             * 重新开始，不沿用上次退出 guard 前累积的缩短/放大结果。 */
+            s_guard_current_sleep_interval_ms = g_guard_sleep_interval_ms;
         }
 
         while(s_guard_mode_active != 0U) {
             /* long low-power sleep between patrols; tickless idle lets
-             * the core WFI here instead of ticking every 1ms */
-            if(xSemaphoreTake(s_guard_key1_sem, pdMS_TO_TICKS(g_guard_sleep_interval_ms)) == pdTRUE) {
+             * the core WFI here instead of ticking every 1ms.
+             * 睡眠时长使用自适应值 s_guard_current_sleep_interval_ms，
+             * 而非固定的 g_guard_sleep_interval_ms：上一轮巡检若检测到
+             * 异常就会缩短，全程 NORMAL 则会放大（见 guard_adjust_sleep_interval）。 */
+            if(xSemaphoreTake(s_guard_key1_sem, pdMS_TO_TICKS(s_guard_current_sleep_interval_ms)) == pdTRUE) {
                 break; /* KEY_4 pressed again: exit guard mode */
             }
 
@@ -492,16 +606,32 @@ static void guard_task(void *pvParameters)
             {
                 TickType_t patrol_last_wake = xTaskGetTickCount();
                 TickType_t patrol_end       = patrol_last_wake + pdMS_TO_TICKS(GUARD_PATROL_DURATION_MS);
-                TickType_t handling_deadline = 0U;
                 uint8_t    in_handling      = 0U;
                 uint8_t    aborted          = 0U;
+                uint8_t    temp_started     = 0U;  /* 标记是否已启动温度转换 */
+                uint8_t    normal_confirm_active = 0U; /* 是否正在累计"连续 NORMAL"确认 */
+                TickType_t normal_confirm_start  = 0U; /* 连续 NORMAL 确认起始时刻 */
+                uint8_t    had_abnormal     = 0U;  /* 本轮巡检（含延长处理窗口）是否出现过非 NORMAL，
+                                                     * 用于驱动自适应睡眠时长；一旦置 1 就不会清零，
+                                                     * 即便之后连续 NORMAL 满足确认时长清了 in_handling */
+
+                /* 巡检开始立即启动第一次温度转换(非阻塞,仅几ms位操作) */
+                temp_start_all();
+                temp_started = 1U;
 
                 while(xTaskGetTickCount() < patrol_end) {
                     uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
-                    /* temp_task 在 guard 模式下已挂起，这里同步采集一次温度写入缓存，
-                     * 再交给状态机消费（等价于旧版 update_input 内部的同步采集）。 */
-                    sensor_manager_sample_temp_blocking(now_ms);
+                    /* 若已启动转换且等待足够时间,读取结果并写入缓存;
+                     * 然后立即启动下一次转换。分阶段采集避免每次循环都忙等 750ms。 */
+                    if(temp_started != 0U) {
+                        temp_result_t result;
+                        vTaskDelay(pdMS_TO_TICKS(TEMP_CONVERSION_WAIT_MS));
+                        if(temp_read_all(&result) != 0U) {
+                            sensor_manager_store_temperature(&result, now_ms);
+                        }
+                        temp_start_all();  /* 启动下一次转换 */
+                    }
                     thermal_control_update(now_ms);
 
                     if(g_system_state_changed_flag != 0U) {
@@ -518,36 +648,31 @@ static void guard_task(void *pvParameters)
                         break;
                     }
 
-                    /* The actual decision: stay powered as long as the
-                     * state machine reports something beyond NORMAL.
-                     * NORMAL -> we may go back to the long sleep.
-                     * Any other state -> keep the board powered and
-                     * keep driving actuators until either we get back
-                     * to NORMAL or the 10 s patrol window ends. */
-                    if(system_state_get_state() != SYSTEM_STATE_NORMAL) {
-                        if(in_handling == 0U) {
-                            in_handling      = 1U;
-                            handling_deadline = xTaskGetTickCount()
-                                              + pdMS_TO_TICKS(g_guard_handling_budget_ms);
-                        }
-                    } else {
-                        in_handling = 0U;
-                    }
+                    /* 更新处理状态：只有连续 NORMAL 满 g_guard_handling_budget_ms
+                     * 才清 in_handling，否则维持处理/保持上电。 */
+                    guard_update_handling_state(&in_handling,
+                                                 &normal_confirm_active, &normal_confirm_start,
+                                                 &had_abnormal);
 
                     vTaskDelayUntil(&patrol_last_wake, pdMS_TO_TICKS(GUARD_PATROL_PERIOD_MS));
                 }
 
-                /* If we're handling a real condition, stay awake past the
-                 * nominal 10 s window for up to g_guard_handling_budget_ms,
-                 * still sampling every GUARD_PATROL_PERIOD_MS. KEY_4 still
-                 * wins and breaks out immediately. */
-                while((in_handling != 0U)
-                   && (xTaskGetTickCount() < handling_deadline)
-                   && (s_guard_mode_active != 0U)) {
+                /* 巡检窗口（GUARD_PATROL_DURATION_MS）结束后，如果仍在处理异常
+                 * (in_handling=1)，继续保持上电并采样，直到连续 NORMAL 满
+                 * g_guard_handling_budget_ms 才允许断电。不设超时上限，处理到底。
+                 * KEY_4 任意时刻可中断退出 guard。 */
+                while((in_handling != 0U) && (s_guard_mode_active != 0U)) {
                     uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 
-                    /* 同上：guard 模式下 temp_task 已挂起，先同步采集写缓存 */
-                    sensor_manager_sample_temp_blocking(now_ms);
+                    /* 同上：分阶段采集温度，避免忙等 */
+                    if(temp_started != 0U) {
+                        temp_result_t result;
+                        vTaskDelay(pdMS_TO_TICKS(TEMP_CONVERSION_WAIT_MS));
+                        if(temp_read_all(&result) != 0U) {
+                            sensor_manager_store_temperature(&result, now_ms);
+                        }
+                        temp_start_all();
+                    }
                     thermal_control_update(now_ms);
 
                     if(g_system_state_changed_flag != 0U) {
@@ -563,19 +688,33 @@ static void guard_task(void *pvParameters)
                         break;
                     }
 
-                    if(system_state_get_state() == SYSTEM_STATE_NORMAL) {
-                        in_handling = 0U;
-                    }
+                    /* 同上：只有连续 NORMAL 满 g_guard_handling_budget_ms 才清 in_handling */
+                    guard_update_handling_state(&in_handling,
+                                                 &normal_confirm_active, &normal_confirm_start,
+                                                 &had_abnormal);
 
                     vTaskDelayUntil(&patrol_last_wake, pdMS_TO_TICKS(GUARD_PATROL_PERIOD_MS));
                 }
 
+                /* 根据本轮巡检（含延长处理窗口）是否出现过非 NORMAL，调整
+                 * 下一轮长睡眠时长：出现过异常 -> 缩短 10%（下限 5s）；
+                 * 全程 NORMAL -> 增加 20%（不设上限）。用户中断(aborted)时
+                 * 不调整，因为本轮巡检并未正常走完。 */
+                if(aborted == 0U) {
+                    guard_adjust_sleep_interval(had_abnormal);
+                }
+
                 /* Power the board back off ONLY if nothing required action.
-                 * If we are still in an abnormal state at the deadline,
-                 * we deliberately keep PG0 on across the next long sleep
-                 * window: the next patrol will continue where this one
-                 * left off, and actuators stay driven. */
+                 * in_handling is cleared only after state has been NORMAL
+                 * continuously for g_guard_handling_budget_ms. */
                 if((aborted == 0U) && (in_handling == 0U)) {
+                    /* 断电前先强制关闭状态指示灯，避免 GPIO 输出寄存器残留导致
+                     * 下次上电瞬间误显示。thermal_control_update() 会在巡检期间
+                     * 根据状态机点亮这些灯，但巡检结束长睡眠前必须归零。 */
+                    actor_set_channel(GPIO_CH_LED_WHITE, 0U);
+                    actor_set_channel(GPIO_CH_LED_GREEN, 0U);
+                    actor_set_channel(GPIO_CH_LED_YELLOW, 0U);
+                    actor_set_channel(GPIO_CH_LED_RED, 0U);
                     relay_power_off();
                     gd_eval_led_off(LED4);  /* 巡检窗口结束（恢复长睡眠），熄灭 LED4 */
                 }
@@ -591,10 +730,10 @@ static void guard_task(void *pvParameters)
 
         power_mode_exit_guard();
 
-        /* 兜底熄灭 LED4：如果上一轮巡检结束时仍处于 in_handling（PG0 保持
-         * 通电、LED4 保持点亮，等待下一轮巡检继续处理），用户此时按 KEY_4
-         * 会在外层循环顶部直接 break，不会经过巡检内部的熄灭逻辑，
-         * 所以这里统一兜底，确保退出 guard 后 LED4 一定是灭的。 */
+        /* 不会再出现"in_handling 未清零、跨长睡眠保持上电"的场景，因为
+         * 延长处理循环不设超时上限，必须连续 NORMAL 满 g_guard_handling_budget_ms
+         * 才断电。此兜底仅处理 KEY_4 中断巡检的情况（用户在外层循环顶部按键
+         * 直接 break，不经过巡检内部的熄灭逻辑），确保退出 guard 后 LED4 一定是灭的。 */
         gd_eval_led_off(LED4);
     }
 }
@@ -602,7 +741,8 @@ static void guard_task(void *pvParameters)
 /* ============================================================
  *  can_handle_control : 执行控制类命令（请求帧 Byte0=0x10）。
  *    在 can_rx_task 上下文调用，返回 ACK 结果码 (CAN_ACK_*)。
- *    0x00~0x05 已实现；0x06~0x0B 属维护模式直控，尚未实现，返回非法。
+ *    0x00~0x07 为通用控制；0x08~0x0D 为维护模式直控，仅手动模式下生效；
+ *    0x0E 为温度趋势预测使能开关，任何模式下均可切换。
  *    电源开关不直接调用 guard_enter/exit（避免与 guard_task 抢占），
  *    而是按当前模式决定是否给 guard_key1_sem 触发一次状态切换。
  * ============================================================ */
@@ -695,6 +835,12 @@ static uint8_t can_handle_control(uint8_t msg_id, const uint8_t *param)
         actor_set_channel(GPIO_CH_GATE, (param[0] != 0U) ? 1U : 0U);
         return CAN_ACK_OK;
 
+    case CAN_CTL_TEMP_PREDICT_ENABLE:
+        /* Byte2 = 1开/0关。与维护模式无关，任何模式下都可切换，
+         * 立即影响 system_state_task() 里的预测升级判断。 */
+        g_temp_prediction_enable = (param[0] != 0U) ? 1U : 0U;
+        return CAN_ACK_OK;
+
     default:
         return CAN_ACK_ILLEGAL;
     }
@@ -760,6 +906,9 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
                 return CAN_ACK_ILLEGAL;
             }
             g_guard_sleep_interval_ms = seconds * 1000U;
+            /* 同步更新自适应睡眠时长当前值，让配置立即生效：下次长睡眠
+             * 会从新的基准值开始，而不是沿用旧基准累积的缩短/放大结果。 */
+            s_guard_current_sleep_interval_ms = g_guard_sleep_interval_ms;
         }
         return CAN_ACK_OK;
 
@@ -828,7 +977,10 @@ static void can_rx_task(void *pvParameters)
 
             switch(rx_msg.id) {
             case CAN_ID_QUERY:
+                /* 查询类命令立即响应,不再延迟到主循环。
+                 * 避免 guard 模式巡检期间响应延迟过大导致上位机超时。 */
                 (void)can_handle_query(msg_id);
+                can_process_pending_uploads();
                 break;
 
             case CAN_ID_CONTROL:

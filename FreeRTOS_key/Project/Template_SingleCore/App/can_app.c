@@ -3,6 +3,7 @@
 #include "can_protocol.h"
 #include "system_state.h"
 #include "../BSW/EcuAL/temp_sensor.h"
+#include "app_tasks.h"
 #include "main.h"
 
 /*
@@ -19,8 +20,10 @@ static volatile uint8_t s_upload_env_flag = 0U;
 static volatile uint8_t s_upload_state_flag = 0U;
 static volatile uint8_t s_upload_system_state_flag = 0U;
 static volatile uint8_t s_upload_fault_flag = 0U;
-static volatile uint8_t s_upload_temp_flag = 0U;
+static volatile uint8_t s_upload_temp_ch_mask = 0U;  /* bit0~3 = CH0~CH3 待上报 */
 static volatile uint8_t s_upload_threshold_flag = 0U;
+static volatile uint8_t s_upload_guard_sleep_flag = 0U;
+static volatile uint8_t s_upload_guard_budget_flag = 0U;
 
 void can_app_init(void)
 {
@@ -44,11 +47,26 @@ ErrStatus can_app_handle_query(uint8_t msg_id)
     case CAN_QRY_FLT:
         s_upload_fault_flag = 1U;
         break;
-    case CAN_QRY_TEMP:
-        s_upload_temp_flag = 1U;
+    case CAN_QRY_TEMP_CH0:
+        s_upload_temp_ch_mask |= 0x01U;
+        break;
+    case CAN_QRY_TEMP_CH1:
+        s_upload_temp_ch_mask |= 0x02U;
+        break;
+    case CAN_QRY_TEMP_CH2:
+        s_upload_temp_ch_mask |= 0x04U;
+        break;
+    case CAN_QRY_TEMP_CH3:
+        s_upload_temp_ch_mask |= 0x08U;
         break;
     case CAN_QRY_THRESHOLD:
         s_upload_threshold_flag = 1U;
+        break;
+    case CAN_QRY_GUARD_SLEEP:
+        s_upload_guard_sleep_flag = 1U;
+        break;
+    case CAN_QRY_GUARD_BUDGET:
+        s_upload_guard_budget_flag = 1U;
         break;
     default:
         return ERROR;
@@ -78,14 +96,25 @@ void can_app_process_pending_uploads(void)
         (void)can_app_upload_fault();
     }
 
-    if(s_upload_temp_flag != 0U) {
-        s_upload_temp_flag = 0U;
-        (void)can_app_upload_temp();
+    if(s_upload_temp_ch_mask != 0U) {
+        uint8_t mask = s_upload_temp_ch_mask;
+        s_upload_temp_ch_mask = 0U;
+        (void)can_app_upload_temp_mask(mask);
     }
 
     if(s_upload_threshold_flag != 0U) {
         s_upload_threshold_flag = 0U;
         (void)can_app_upload_threshold();
+    }
+
+    if(s_upload_guard_sleep_flag != 0U) {
+        s_upload_guard_sleep_flag = 0U;
+        (void)can_app_upload_guard_sleep();
+    }
+
+    if(s_upload_guard_budget_flag != 0U) {
+        s_upload_guard_budget_flag = 0U;
+        (void)can_app_upload_guard_budget();
     }
 }
 
@@ -130,17 +159,32 @@ ErrStatus can_app_upload_fault(void)
     return can_protocol_send_fault_response(0U, 0U, 0U, 0U, 0U, 0U, 0U);
 }
 
-ErrStatus can_app_upload_temp(void)
+ErrStatus can_app_upload_temp_mask(uint8_t ch_mask)
 {
+    static const uint8_t msg_id_of_ch[4] = {
+        CAN_QRY_TEMP_CH0, CAN_QRY_TEMP_CH1, CAN_QRY_TEMP_CH2, CAN_QRY_TEMP_CH3
+    };
     system_state_input_t input;
+    ErrStatus ret = SUCCESS;
+    uint8_t ch;
+
     system_state_get_input(&input);
 
-    int16_t temp_ch0 = input.zone_temp_valid[0] ? input.zone_temperature_tenths[0] : 0;
-    int16_t temp_ch1 = input.zone_temp_valid[1] ? input.zone_temperature_tenths[1] : 0;
-    int16_t temp_ch2 = input.zone_temp_valid[2] ? input.zone_temperature_tenths[2] : 0;
-    int16_t temp_ch3 = input.zone_temp_valid[3] ? input.zone_temperature_tenths[3] : 0;
+    for(ch = 0U; ch < 4U; ch++) {
+        if((ch_mask & (uint8_t)(1U << ch)) != 0U) {
+            int16_t temp = input.zone_temp_valid[ch] ? input.zone_temperature_tenths[ch] : 0;
+            if(can_protocol_send_temp_ch_response(msg_id_of_ch[ch], temp) != SUCCESS) {
+                ret = ERROR;
+            }
+        }
+    }
 
-    return can_protocol_send_temp_response(temp_ch0, temp_ch1, temp_ch2, temp_ch3);
+    return ret;
+}
+
+ErrStatus can_app_upload_temp(void)
+{
+    return can_app_upload_temp_mask(0x0FU);
 }
 
 ErrStatus can_app_upload_threshold(void)
@@ -149,4 +193,17 @@ ErrStatus can_app_upload_threshold(void)
                                                  g_low_temp_threshold_tenths,
                                                  g_high_temp_threshold_tenths,
                                                  g_danger_temp_threshold_tenths);
+}
+
+ErrStatus can_app_upload_guard_sleep(void)
+{
+    uint16_t base_seconds    = (uint16_t)(g_guard_sleep_interval_ms / 1000U);
+    uint16_t current_seconds = (uint16_t)(app_tasks_get_guard_current_sleep_ms() / 1000U);
+    return can_protocol_send_guard_sleep_response(base_seconds, current_seconds);
+}
+
+ErrStatus can_app_upload_guard_budget(void)
+{
+    uint16_t budget_seconds = (uint16_t)(g_guard_handling_budget_ms / 1000U);
+    return can_protocol_send_guard_budget_response(budget_seconds);
 }

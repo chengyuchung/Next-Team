@@ -4,6 +4,9 @@
 #include "gd32a7xx_gpio.h"
 #include "gd32a7xx_rcu.h"
 
+#include "FreeRTOS.h"
+#include "task.h"
+
 /*
  * ============================================================================
  * 模块名称 : adc_manager
@@ -47,6 +50,7 @@
 /* ========================================================================== */
 
 static uint8_t s_inited = 0U;
+static uint8_t s_calibration_failed = 0U;
 
 /* 硬件通道配置表（ADC_CH_INxx -> GPIO + ADC 硬件资源）
  * 
@@ -114,11 +118,15 @@ static void adc_manager_apply_channel_config(void)
     }
 }
 
-static void adc_manager_apply_calibration(void)
+static uint8_t adc_manager_apply_calibration(void)
 {
-    /* 偏移校准可提升静态精度。 */
+    /* 偏移校准可提升静态精度。调用前必须已 adc_enable() 并稳定，
+     * 否则 adc_calibration_enable() 会长时间轮询超时（见 adc_manager_init）。
+     * 校准次数与官方 07_ADC0_ADC1_Routine_Parallel_mode demo（同芯片系列）
+     * 保持一致，取 7 次以提升校准结果稳定性。 */
     adc_calibration_mode_config(ADC0, ADC_CALIBRATION_OFFSET);
-    (void)adc_calibration_enable(ADC0);
+    adc_calibration_number(ADC0, ADC_CALIBRATION_NUM7);
+    return adc_calibration_enable(ADC0);
 }
 
 /* ========================================================================== */
@@ -136,15 +144,15 @@ void adc_manager_init(void)
 
     /* 配置 ADC 时钟源与预分频。
      * 参考手册建议：f_ADC 推荐 16MHz，最低 1MHz，最高 60MHz（保证精度）。
-     * 系统时钟源为 RCU_CKSYSSRC_IRC48M（48MHz），HCLK = 48MHz。
-     * 取 HCLK / 8 = 6MHz，在允许范围内（满足 1~16MHz），虽低于推荐值 16MHz，
-     *   但更低的 f_ADC 有利于提升采样精度。
-     * 若需要接近 16MHz，可改为切换到 PLL 时钟源。
-     *   - RCU_ADCSRC_HCLK : HCLK（48MHz）
-     *   - RCU_ADCSRC_SYS  : CK_SYS（48MHz）
+     * 本工程系统时钟为 160MHz PLL（见 system_gd32a71xx_a74xx.c 中
+     * __SYSTEM_CLOCK_160M_PLL_HXTAL，AHB 分频 DIV1），即 HCLK = 160MHz。
+     * 取 HCLK / 10 = 16MHz，正好落在推荐值，与官方 07_ADC0_ADC1_Routine_
+     * Parallel_mode demo（同为 160MHz 主频）使用的分频一致。
+     *   - RCU_ADCSRC_HCLK : HCLK（160MHz）
+     *   - RCU_ADCSRC_SYS  : CK_SYS（160MHz）
      *   - RCU_ADCSRC_PLLP : PLL P 分频（可提供更高频率）
      */
-    rcu_adc_clock_config(RCU_ADCSRC_HCLK, RCU_CKADC_DIV8);
+    rcu_adc_clock_config(RCU_ADCSRC_HCLK, RCU_CKADC_DIV10);
 
     adc_deinit(ADC0);
 
@@ -154,9 +162,24 @@ void adc_manager_init(void)
     /* 单次转换模式：每次软件触发执行一次常规序列转换。 */
     adc_routine_sequence_conversion_mode_config(ADC0, ADC_ONE_SHOT_MODE);
 
-    adc_manager_apply_calibration();
-
+    /* 关键顺序（参考官方 06_ADC_Temperature_Vrefint /
+     * 07_ADC0_ADC1_Routine_Parallel_mode demo）：
+     * 必须先 adc_enable() 让 ADC 模拟部分上电，稳定一小段时间后才能校准。
+     * 之前的实现在 adc_enable() 之前就调用校准，此时 ADCON 尚未置位，
+     * 校准的 RSTCLB/CLB 硬件位可能永远不会被清零，adc_calibration_enable()
+     * 内部的超时轮询（约 1600 万次循环）因此长时间空转，
+     * 这就是之前观察到的"上电卡死"现象的根因。 */
     adc_enable(ADC0);
+
+    /* 等待 ADC 模拟部分稳定。init_task 在 vTaskStartScheduler() 之后运行，
+     * tick 已经启动，用 vTaskDelay() 让出 CPU 而不是裸自旋。 */
+    vTaskDelay(pdMS_TO_TICKS(1U));
+
+    if(adc_manager_apply_calibration() == 0U) {
+        /* 校准失败：ADC 仍可用，但精度无法保证，记录状态供上层排查。 */
+        s_calibration_failed = 1U;
+    }
+
     s_inited = 1U;
 }
 
@@ -206,4 +229,9 @@ uint8_t adc_manager_read_mv(adc_channel_t channel, uint16_t vref_mv, uint16_t *m
     value_mv = ((uint32_t)raw * (uint32_t)vref_mv) / 4095U;
     *mv = (uint16_t)value_mv;
     return 1U;
+}
+
+uint8_t adc_manager_calibration_ok(void)
+{
+    return (s_calibration_failed == 0U) ? 1U : 0U;
 }

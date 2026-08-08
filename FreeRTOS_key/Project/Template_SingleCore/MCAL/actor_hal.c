@@ -49,10 +49,10 @@ static const actor_pin_map_t s_pin_map[GPIO_CH_MAX] = {
     { GPIOF, GPIO_PIN_9 },   /* buzzer     PF9  */
     { GPIOF, GPIO_PIN_10 },  /* gate       PF10 */
     { GPIOG, GPIO_PIN_0 },   /* relay_pwr  PG0  */
-    { GPIOE, GPIO_PIN_10 },  /* led_white  PE10 - 低温白灯 */
-    { GPIOE, GPIO_PIN_11 },  /* led_green  PE11 - 正常绿灯 */
-    { GPIOE, GPIO_PIN_12 },  /* led_yellow PE12 - 高温黄灯 */
-    { GPIOE, GPIO_PIN_13 },  /* led_red    PE13 - 危险红灯 */
+    { GPIOG, GPIO_PIN_2 },   /* led_white  PG2  - 低温白灯 */
+    { GPIOG, GPIO_PIN_3 },   /* led_green  PG3  - 正常绿灯 */
+    { GPIOG, GPIO_PIN_4 },   /* led_yellow PG4  - 高温黄灯 */
+    { GPIOG, GPIO_PIN_5 },   /* led_red    PG5  - 危险红灯 */
 };
 
 /*
@@ -122,7 +122,6 @@ void actor_init(const actor_config_t *config)
         }
     }
 
-    rcu_periph_clock_enable(RCU_GPIOE);
     rcu_periph_clock_enable(RCU_GPIOF);
     rcu_periph_clock_enable(RCU_GPIOG);
 

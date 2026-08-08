@@ -100,6 +100,17 @@ uint8_t adc_manager_read_raw(adc_channel_t channel, uint16_t *raw_12bit);
  */
 uint8_t adc_manager_read_mv(adc_channel_t channel, uint16_t vref_mv, uint16_t *mv);
 
+/*
+ * 函数名称 : adc_manager_calibration_ok
+ * 功能描述 : 查询 adc_manager_init() 内部校准是否成功。
+ * 输入参数 : 无。
+ * 输出参数 : 无。
+ * 返 回 值 :
+ *   - 1U : 校准成功（或尚未初始化）；
+ *   - 0U : 校准失败，读数精度不受保证，可用于上报故障。
+ */
+uint8_t adc_manager_calibration_ok(void);
+
 #ifdef __cplusplus
 }
 #endif
