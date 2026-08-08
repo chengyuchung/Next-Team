@@ -44,13 +44,17 @@ extern "C" {
 #define CAN_ID_RESEND_REQUEST    0xFFFU
 
 /* 查询类消息号（Byte1），ID=0x188 双向 */
-#define CAN_QRY_ENV     0x00U
-#define CAN_QRY_STA     0x01U
-#define CAN_QRY_SYS     0x02U
+#define CAN_QRY_ENV       0x00U
+#define CAN_QRY_STA       0x01U
+#define CAN_QRY_SYS       0x02U
 #define CAN_QRY_FLT       0x03U
-#define CAN_QRY_TEMP      0x04U
-#define CAN_QRY_TEMP_HI   0x05U
-#define CAN_QRY_THRESHOLD 0x06U
+#define CAN_QRY_TEMP_CH0  0x04U  /* 分区温度 - 通道0 */
+#define CAN_QRY_TEMP_CH1  0x05U  /* 分区温度 - 通道1 */
+#define CAN_QRY_TEMP_CH2  0x06U  /* 分区温度 - 通道2 */
+#define CAN_QRY_TEMP_CH3  0x07U  /* 分区温度 - 通道3 */
+#define CAN_QRY_THRESHOLD 0x08U  /* 温度阈值查询 */
+#define CAN_QRY_GUARD_SLEEP  0x09U  /* guard 睡眠时长查询（基准值 + 当前自适应值） */
+#define CAN_QRY_GUARD_BUDGET 0x0AU  /* guard 巡检异常处理后 NORMAL 持续确认时长查询 */
 
 /* 保留字节填充值 */
 #define CAN_RSVD_FILL   0xCCU
@@ -70,6 +74,7 @@ extern "C" {
 #define CAN_CTL_FAN          0x0BU
 #define CAN_CTL_PUMP         0x0CU
 #define CAN_CTL_GATE         0x0DU
+#define CAN_CTL_TEMP_PREDICT_ENABLE 0x0EU  /* 温度趋势预测功能使能开关 */
 
 /* 系统复位校验码 */
 #define CAN_CTL_RESET_MAGIC  0xA5A5U
@@ -133,6 +138,11 @@ typedef struct {
     uint16_t danger_temp_threshold_tenths;
 } can_threshold_data_t;
 
+typedef struct {
+    uint16_t base_seconds;      /* 配置的基准值（g_guard_sleep_interval_ms / 1000） */
+    uint16_t current_seconds;   /* 自适应算法当前实际生效的睡眠时长（秒） */
+} can_guard_sleep_data_t;
+
 /*
  * CAN 协议层接口 - 查询类响应发送
  */
@@ -140,8 +150,10 @@ ErrStatus can_protocol_send_env_response(uint8_t msg_id, int16_t temp_tenths, in
 ErrStatus can_protocol_send_state_response(uint8_t msg_id, uint8_t fan_duty, uint8_t pump_duty, uint8_t cooler_on, uint8_t gate_on);
 ErrStatus can_protocol_send_system_state_response(uint8_t msg_id, uint8_t level);
 ErrStatus can_protocol_send_fault_response(uint8_t cooler_mask, uint8_t heater_mask, uint8_t gas_sensor, uint8_t gate_fault, uint8_t fan_fault, uint8_t pump_fault, uint8_t press_sensor);
-ErrStatus can_protocol_send_temp_response(int16_t temp_ch0, int16_t temp_ch1, int16_t temp_ch2, int16_t temp_ch3);
+ErrStatus can_protocol_send_temp_ch_response(uint8_t msg_id, int16_t temp_tenths);
 ErrStatus can_protocol_send_threshold_response(uint8_t msg_id, uint16_t low_temp, uint16_t high_temp, uint16_t danger_temp);
+ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t current_seconds);
+ErrStatus can_protocol_send_guard_budget_response(uint16_t budget_seconds);
 
 /*
  * CAN 协议层接口 - 控制类/配置类 ACK 响应

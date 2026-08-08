@@ -108,46 +108,26 @@ ErrStatus can_protocol_send_fault_response(uint8_t cooler_mask, uint8_t heater_m
 }
 
 /*
- * can_protocol_send_temp_response - 4路温度查询响应，连发两帧 (ID: 0x188, Byte0=CAN_NODE_MCU)
- *
- * 帧1（Byte1=CAN_QRY_TEMP 0x04）：
- *   Byte2~3  ch0 温度（int16_t，高字节在前，0.1°C 单位）
- *   Byte4~5  ch1 温度
- *   Byte6~7  预留，填 0xCC
- *
- * 帧2（Byte1=CAN_QRY_TEMP_HI 0x05）：
- *   Byte2~3  ch2 温度
- *   Byte4~5  ch3 温度
- *   Byte6~7  预留，填 0xCC
+ * can_protocol_send_temp_ch_response - 单路分区温度查询响应 (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_TEMP_CH0~CH3）
+ *   Byte[2,3]  该路温度 int16_t，高字节在前（0.1°C 单位）
+ *   Byte4~7    预留，填 0xCC
  */
-ErrStatus can_protocol_send_temp_response(int16_t temp_ch0, int16_t temp_ch1,
-                                  int16_t temp_ch2, int16_t temp_ch3)
+ErrStatus can_protocol_send_temp_ch_response(uint8_t msg_id, int16_t temp_tenths)
 {
     uint8_t data[8] = {0};
-    ErrStatus ret;
 
-    /* 帧1：ch0 + ch1 */
     data[0] = CAN_NODE_MCU;
-    data[1] = CAN_QRY_TEMP;
-    data[2] = (uint8_t)((uint16_t)temp_ch0 >> 8);
-    data[3] = (uint8_t)((uint16_t)temp_ch0 & 0xFFU);
-    data[4] = (uint8_t)((uint16_t)temp_ch1 >> 8);
-    data[5] = (uint8_t)((uint16_t)temp_ch1 & 0xFFU);
+    data[1] = msg_id;
+    data[2] = (uint8_t)((uint16_t)temp_tenths >> 8);
+    data[3] = (uint8_t)((uint16_t)temp_tenths & 0xFFU);
+    data[4] = CAN_RSVD_FILL;
+    data[5] = CAN_RSVD_FILL;
     data[6] = CAN_RSVD_FILL;
     data[7] = CAN_RSVD_FILL;
-    ret = can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
 
-    /* 帧2：ch2 + ch3 */
-    data[1] = CAN_QRY_TEMP_HI;
-    data[2] = (uint8_t)((uint16_t)temp_ch2 >> 8);
-    data[3] = (uint8_t)((uint16_t)temp_ch2 & 0xFFU);
-    data[4] = (uint8_t)((uint16_t)temp_ch3 >> 8);
-    data[5] = (uint8_t)((uint16_t)temp_ch3 & 0xFFU);
-    if(can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U) != SUCCESS) {
-        ret = ERROR;
-    }
-
-    return ret;
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
 }
 
 /*
@@ -170,6 +150,54 @@ ErrStatus can_protocol_send_threshold_response(uint8_t msg_id, uint16_t low_temp
     data[5] = (uint8_t)(high_temp & 0xFFU);
     data[6] = (uint8_t)(danger_temp >> 8);
     data[7] = (uint8_t)(danger_temp & 0xFFU);
+
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
+}
+
+/*
+ * can_protocol_send_guard_sleep_response - guard 睡眠时长查询响应 (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_GUARD_SLEEP）
+ *   Byte[2,3]  基准值 uint16_t，高字节在前，单位：秒（对应 g_guard_sleep_interval_ms）
+ *   Byte[4,5]  当前生效值 uint16_t，高字节在前，单位：秒（自适应算法实时结果）
+ *   Byte6~7    预留，填 0xCC
+ */
+ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t current_seconds)
+{
+    uint8_t data[8] = {0};
+
+    data[0] = CAN_NODE_MCU;
+    data[1] = CAN_QRY_GUARD_SLEEP;
+    data[2] = (uint8_t)(base_seconds >> 8);
+    data[3] = (uint8_t)(base_seconds & 0xFFU);
+    data[4] = (uint8_t)(current_seconds >> 8);
+    data[5] = (uint8_t)(current_seconds & 0xFFU);
+    data[6] = CAN_RSVD_FILL;
+    data[7] = CAN_RSVD_FILL;
+
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
+}
+
+/*
+ * can_protocol_send_guard_budget_response - guard 巡检异常处理后 NORMAL 持续确认时长查询响应
+ *   (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_GUARD_BUDGET）
+ *   Byte[2,3]  确认时长 uint16_t，高字节在前，单位：秒（对应 g_guard_handling_budget_ms）
+ *   Byte4~7    预留，填 0xCC
+ */
+ErrStatus can_protocol_send_guard_budget_response(uint16_t budget_seconds)
+{
+    uint8_t data[8] = {0};
+
+    data[0] = CAN_NODE_MCU;
+    data[1] = CAN_QRY_GUARD_BUDGET;
+    data[2] = (uint8_t)(budget_seconds >> 8);
+    data[3] = (uint8_t)(budget_seconds & 0xFFU);
+    data[4] = CAN_RSVD_FILL;
+    data[5] = CAN_RSVD_FILL;
+    data[6] = CAN_RSVD_FILL;
+    data[7] = CAN_RSVD_FILL;
 
     return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
 }

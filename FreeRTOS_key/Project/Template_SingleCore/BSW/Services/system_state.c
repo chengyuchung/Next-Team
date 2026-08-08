@@ -406,7 +406,11 @@ static void system_state_update_temp_rates(const system_state_input_t *input)
         }
 
         dtemp = (int32_t)current_temp - (int32_t)s_zone_prev_temp[zone_idx];
-        rate_raw = (dtemp * 100000) / dt_ms;
+        /* 单位换算：dtemp 单位 0.1°C，dt_ms 单位 ms，目标单位 0.01°C/s
+         * rate = (dtemp [0.1°C]) / (dt_ms [ms] / 1000) * 100 [转成 0.01°C/s]
+         *      = (dtemp * 100 * 1000) / dt_ms = (dtemp * 10000) / dt_ms
+         * 之前误写成 100000，导致计算结果放大 10 倍，0.01°C/s 的噪声就触发预测告警。 */
+        rate_raw = (dtemp * 10000) / dt_ms;
 
         if(s_zone_rate_valid[zone_idx] == 0U) {
             s_zone_temp_rate[zone_idx] = (int16_t)rate_raw;
@@ -451,7 +455,7 @@ static uint8_t system_state_zone_predict_danger(const system_state_input_t *inpu
     }
 
     horizon_ms = (int32_t)g_temp_prediction_horizon_s * 1000;
-    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 100000;
+    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 10000;
 
     if(predicted_temp >= (int32_t)g_danger_temp_threshold_tenths) {
         return 1U;
@@ -488,7 +492,7 @@ static uint8_t system_state_zone_predict_high_temp(const system_state_input_t *i
     }
 
     horizon_ms = (int32_t)g_temp_prediction_horizon_s * 1000;
-    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 100000;
+    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 10000;
 
     if(predicted_temp >= (int32_t)g_high_temp_threshold_tenths) {
         return 1U;

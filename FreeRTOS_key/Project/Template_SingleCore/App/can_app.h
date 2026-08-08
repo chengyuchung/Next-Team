@@ -133,8 +133,20 @@ ErrStatus can_app_upload_system_state(void);
 ErrStatus can_app_upload_fault(void);
 
 /*
+ * 函数名称 : can_app_upload_temp_mask
+ * 功能描述 : 按位掩码上报指定分区的温度（每路各发一帧，各自独立消息号）。
+ * 输入参数 :
+ *   - ch_mask : bit0~3 分别对应 CH0~CH3，置位表示需要上报该路
+ * 输出参数 : 无
+ * 返 回 值 :
+ *   - SUCCESS : 全部发送成功
+ *   - ERROR   : 至少一帧发送失败
+ */
+ErrStatus can_app_upload_temp_mask(uint8_t ch_mask);
+
+/*
  * 函数名称 : can_app_upload_temp
- * 功能描述 : 上报4路温度详细数据。
+ * 功能描述 : 上报4路温度详细数据（等价于 can_app_upload_temp_mask(0x0F)）。
  * 输入参数 : 无
  * 输出参数 : 无
  * 返 回 值 :
@@ -154,6 +166,28 @@ ErrStatus can_app_upload_temp(void);
  */
 ErrStatus can_app_upload_threshold(void);
 
+/*
+ * 函数名称 : can_app_upload_guard_sleep
+ * 功能描述 : 上报 guard 睡眠时长（配置基准值 + 自适应算法当前生效值，单位：秒）。
+ * 输入参数 : 无
+ * 输出参数 : 无
+ * 返 回 值 :
+ *   - SUCCESS : 发送成功
+ *   - ERROR   : 发送失败
+ */
+ErrStatus can_app_upload_guard_sleep(void);
+
+/*
+ * 函数名称 : can_app_upload_guard_budget
+ * 功能描述 : 上报 guard 巡检异常处理后 NORMAL 持续确认时长（单位：秒）。
+ * 输入参数 : 无
+ * 输出参数 : 无
+ * 返 回 值 :
+ *   - SUCCESS : 发送成功
+ *   - ERROR   : 发送失败
+ */
+ErrStatus can_app_upload_guard_budget(void);
+
 /* 兼容旧代码的宏定义 */
 #define can_handle_query               can_app_handle_query
 #define can_upload_env                 can_app_upload_env
@@ -162,6 +196,8 @@ ErrStatus can_app_upload_threshold(void);
 #define can_upload_fault               can_app_upload_fault
 #define can_upload_temp                can_app_upload_temp
 #define can_upload_threshold           can_app_upload_threshold
+#define can_upload_guard_sleep         can_app_upload_guard_sleep
+#define can_upload_guard_budget        can_app_upload_guard_budget
 #define can_process_pending_uploads    can_app_process_pending_uploads
 
 /* 直接暴露协议层函数（用于 ACK 响应） */

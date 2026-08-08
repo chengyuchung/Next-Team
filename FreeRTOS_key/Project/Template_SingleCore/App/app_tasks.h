@@ -50,6 +50,15 @@ typedef struct {
  */
 void app_tasks_start(void);
 
+/*
+ * app_tasks_get_guard_current_sleep_ms
+ *   查询 guard_task 自适应长睡眠算法当前实际生效的睡眠时长（毫秒）。
+ *   与 g_guard_sleep_interval_ms（配置基准值）不同：本值会随巡检结果
+ *   动态缩短/放大（见 app_tasks.c 的 guard_adjust_sleep_interval()）。
+ *   供 CAN 查询响应（CAN_QRY_GUARD_SLEEP）读取，仅读不写。
+ */
+uint32_t app_tasks_get_guard_current_sleep_ms(void);
+
 #ifdef __cplusplus
 }
 #endif

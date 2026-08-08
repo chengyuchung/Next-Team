@@ -33,6 +33,7 @@
 #include "watchdog.h"
 #include "BSW/EcuAL/pressure_sensor.h"
 #include "BSW/EcuAL/temp_sensor.h"
+#include "MCAL/i2c.h"
 #include "MCAL/adc_manager.h"
 #include "BSW/EcuAL/gas_sensor.h"
 #include "motor_pwm_gd32.h"
@@ -97,12 +98,22 @@ void board_init(void)
 
     can_app_init();
 
+    /* BMP280 挂在 I2C1 (GPIOB PB0/PB2) 上，bmp280_init() 前提是 I2C 总线
+     * 已完成上电与配置（见 bmp280.h 的说明），否则 bmp280_wait_flag() 会一路
+     * 超时返回 BMP280_ERR_I2C_TIMEOUT，导致气压永远读不到（valid 恒为0）。
+     * 之前这里漏掉了 i2c.c 的三步初始化，现补上。 */
+    rcu_config();
+    gpio_config();
+    i2c_config();
+
     (void)pressure_sensor_init(0x76U);
 
     /* 4路DS18B20：分区测温，每路对应一个加热/制冷分区 */
     temp_sensor_init();
 
-    /* adc_manager_init();  // TODO: re-enable once power-up hang is resolved */
+    /* 之前的挂死根因是 adc_manager 内部校准顺序错误（校准早于 adc_enable），
+     * 已在 adc_manager.c 中修正为 enable -> 延时 -> 校准，现重新启用。 */
+    adc_manager_init();
 
     gas_sensor_init(NULL);
 

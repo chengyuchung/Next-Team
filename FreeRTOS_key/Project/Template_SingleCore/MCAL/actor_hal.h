@@ -31,10 +31,10 @@ typedef enum {
     GPIO_CH_BUZZER = 8,      /* 蜂鸣器 */
     GPIO_CH_GATE = 9,        /* 泄压阀 */
     GPIO_CH_RELAY_PWR = 10,  /* 继电器电源 */
-    GPIO_CH_LED_WHITE = 11,  /* 低温白灯 (PE10) */
-    GPIO_CH_LED_GREEN = 12,  /* 正常绿灯 (PE11) */
-    GPIO_CH_LED_YELLOW = 13, /* 高温黄灯 (PE12) */
-    GPIO_CH_LED_RED = 14,    /* 危险红灯 (PE13) */
+    GPIO_CH_LED_WHITE = 11,  /* 低温白灯 (PG2) */
+    GPIO_CH_LED_GREEN = 12,  /* 正常绿灯 (PG3) */
+    GPIO_CH_LED_YELLOW = 13, /* 高温黄灯 (PG4) */
+    GPIO_CH_LED_RED = 14,    /* 危险红灯 (PG5) */
     GPIO_CH_MAX = 15
 } actor_channel_t;
 
