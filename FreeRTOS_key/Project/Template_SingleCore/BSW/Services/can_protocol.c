@@ -183,19 +183,21 @@ ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t
  *   (ID: 0x188, Byte0=CAN_NODE_MCU)
  *   Byte0      源节点（0x20=MCU）
  *   Byte1      消息号（回显 CAN_QRY_GUARD_BUDGET）
- *   Byte[2,3]  确认时长 uint16_t，高字节在前，单位：秒（对应 g_guard_handling_budget_ms）
- *   Byte4~7    预留，填 0xCC
+ *   Byte[2,3]  基准值 uint16_t，高字节在前，单位：秒（对应 g_guard_handling_budget_ms）
+ *   Byte[4,5]  当前生效值 uint16_t，高字节在前，单位：秒（自适应算法实时结果，
+ *              只增不减：本轮巡检出现过非 NORMAL 就增加 10%）
+ *   Byte6~7    预留，填 0xCC
  */
-ErrStatus can_protocol_send_guard_budget_response(uint16_t budget_seconds)
+ErrStatus can_protocol_send_guard_budget_response(uint16_t base_seconds, uint16_t current_seconds)
 {
     uint8_t data[8] = {0};
 
     data[0] = CAN_NODE_MCU;
     data[1] = CAN_QRY_GUARD_BUDGET;
-    data[2] = (uint8_t)(budget_seconds >> 8);
-    data[3] = (uint8_t)(budget_seconds & 0xFFU);
-    data[4] = CAN_RSVD_FILL;
-    data[5] = CAN_RSVD_FILL;
+    data[2] = (uint8_t)(base_seconds >> 8);
+    data[3] = (uint8_t)(base_seconds & 0xFFU);
+    data[4] = (uint8_t)(current_seconds >> 8);
+    data[5] = (uint8_t)(current_seconds & 0xFFU);
     data[6] = CAN_RSVD_FILL;
     data[7] = CAN_RSVD_FILL;
 

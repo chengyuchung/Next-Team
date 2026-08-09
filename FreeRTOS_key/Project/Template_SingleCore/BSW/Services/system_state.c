@@ -131,10 +131,9 @@ static system_state_t system_state_reduce_zone_states(void)
 /*
  * system_state_zone_apply_outputs
  *   根据分区状态设置该分区的加热片/制冷片使能。
- *   与原整体状态机的对应关系一致：
- *     LOW_TEMP  : 加热片开，制冷片关；
- *     DANGER    : 加热片关，制冷片开；
- *     NORMAL/HIGH_TEMP : 加热片、制冷片均关。
+ *     LOW_TEMP           : 加热片开，制冷片关；
+ *     HIGH_TEMP / DANGER : 加热片关，制冷片开；
+ *     NORMAL             : 加热片、制冷片均关。
  */
 static void system_state_zone_apply_outputs(uint8_t zone_idx, system_state_t state)
 {
@@ -143,12 +142,12 @@ static void system_state_zone_apply_outputs(uint8_t zone_idx, system_state_t sta
         s_status.heater_enable[zone_idx] = 1U;
         s_status.cooler_enable[zone_idx] = 0U;
         break;
+    case SYSTEM_STATE_HIGH_TEMP:
     case SYSTEM_STATE_DANGER:
         s_status.heater_enable[zone_idx] = 0U;
         s_status.cooler_enable[zone_idx] = 1U;
         break;
     case SYSTEM_STATE_NORMAL:
-    case SYSTEM_STATE_HIGH_TEMP:
     default:
         s_status.heater_enable[zone_idx] = 0U;
         s_status.cooler_enable[zone_idx] = 0U;

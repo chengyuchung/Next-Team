@@ -54,7 +54,10 @@ extern "C" {
 #define CAN_QRY_TEMP_CH3  0x07U  /* 分区温度 - 通道3 */
 #define CAN_QRY_THRESHOLD 0x08U  /* 温度阈值查询 */
 #define CAN_QRY_GUARD_SLEEP  0x09U  /* guard 睡眠时长查询（基准值 + 当前自适应值） */
-#define CAN_QRY_GUARD_BUDGET 0x0AU  /* guard 巡检异常处理后 NORMAL 持续确认时长查询 */
+#define CAN_QRY_GUARD_BUDGET 0x0AU  /* guard 巡检异常处理后 NORMAL 持续确认时长查询（基准值 + 当前自适应值） */
+#define CAN_QRY_TEMP_ALL     0x0BU  /* 4路分区温度一次性查询：MCU依次回复4帧，
+                                      * 消息号仍分别回显 CAN_QRY_TEMP_CH0~CH3，
+                                      * 帧格式与单路查询完全一致 */
 
 /* 保留字节填充值 */
 #define CAN_RSVD_FILL   0xCCU
@@ -79,7 +82,9 @@ extern "C" {
 /* 系统复位校验码 */
 #define CAN_CTL_RESET_MAGIC  0xA5A5U
 
-/* 配置类消息号（Byte1），ID=0x18A 双向 */
+/* 配置类消息号（Byte1），ID=0x18A 双向
+ * 0x00~0x02 三个温度阈值配置：Byte[2,3] = uint16_t，高字节在前，
+ * 单位 0.1°C（与 CAN_QRY_THRESHOLD 查询响应格式一致），取值范围 0~1000。 */
 #define CAN_CFG_HIGH_TEMP_THRESHOLD     0x00U
 #define CAN_CFG_DANGER_TEMP_THRESHOLD   0x01U
 #define CAN_CFG_LOW_TEMP_THRESHOLD      0x02U
@@ -143,6 +148,11 @@ typedef struct {
     uint16_t current_seconds;   /* 自适应算法当前实际生效的睡眠时长（秒） */
 } can_guard_sleep_data_t;
 
+typedef struct {
+    uint16_t base_seconds;      /* 配置的基准值（g_guard_handling_budget_ms / 1000） */
+    uint16_t current_seconds;   /* 自适应算法当前实际生效的确认时长（秒），只增不减 */
+} can_guard_budget_data_t;
+
 /*
  * CAN 协议层接口 - 查询类响应发送
  */
@@ -153,7 +163,7 @@ ErrStatus can_protocol_send_fault_response(uint8_t cooler_mask, uint8_t heater_m
 ErrStatus can_protocol_send_temp_ch_response(uint8_t msg_id, int16_t temp_tenths);
 ErrStatus can_protocol_send_threshold_response(uint8_t msg_id, uint16_t low_temp, uint16_t high_temp, uint16_t danger_temp);
 ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t current_seconds);
-ErrStatus can_protocol_send_guard_budget_response(uint16_t budget_seconds);
+ErrStatus can_protocol_send_guard_budget_response(uint16_t base_seconds, uint16_t current_seconds);
 
 /*
  * CAN 协议层接口 - 控制类/配置类 ACK 响应

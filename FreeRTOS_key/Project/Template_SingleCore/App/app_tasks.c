@@ -170,6 +170,15 @@ uint32_t g_guard_handling_budget_ms   = 30U * 1000U;  /* 巡检异常处理后�
 #define GUARD_ADAPTIVE_GROW_PCT       ( 120U )  /* 增加 20%：乘以 120% */
 static uint32_t s_guard_current_sleep_interval_ms = 15U * 1000U;
 
+/* 自适应 NORMAL 持续确认时长（handling budget）：
+ *   每次全新进入 guard 模式时，从 g_guard_handling_budget_ms 基准值重新开始；
+ *   此后每完成一次巡检（未被用户中断）：
+ *     - 本轮出现过非 NORMAL 状态 -> 下一轮确认时长增加 10%（安全性更高）；
+ *     - 本轮全程 NORMAL           -> 保持不变（只增不减，偏安全设计）；
+ *   四舍五入到整数秒，不设上限。 */
+#define GUARD_ADAPTIVE_BUDGET_GROW_PCT  ( 110U )  /* 增加 10%：乘以 110% */
+static uint32_t s_guard_current_budget_ms = 30U * 1000U;
+
 /* ---- guard (低功耗巡检) mode timing ------------------------------------
  * KEY_4 切换进入/退出 guard 巡检模式：
  *   - 上电默认处于 guard 模式：relay_power_init(0U) 把 PG0 置低，
@@ -501,7 +510,7 @@ static void guard_update_handling_state(uint8_t *in_handling,
         return;
     }
 
-    if((now_tick - *normal_confirm_start) >= pdMS_TO_TICKS(g_guard_handling_budget_ms)) {
+    if((now_tick - *normal_confirm_start) >= pdMS_TO_TICKS(s_guard_current_budget_ms)) {
         *in_handling = 0U;
         *normal_confirm_active = 0U;
     }
@@ -535,6 +544,18 @@ uint32_t app_tasks_get_guard_current_sleep_ms(void)
     return s_guard_current_sleep_interval_ms;
 }
 
+/*
+ * app_tasks_get_guard_current_budget_ms
+ *   对外暴露 s_guard_current_budget_ms 的只读访问接口，供
+ *   can_app.c 的 CAN_QRY_GUARD_BUDGET 查询响应读取当前自适应值。
+ *   与 g_guard_handling_budget_ms（配置基准值）不同：本值会随巡检
+ *   结果动态增加（见 guard_adjust_budget()）。
+ */
+uint32_t app_tasks_get_guard_current_budget_ms(void)
+{
+    return s_guard_current_budget_ms;
+}
+
 static void guard_adjust_sleep_interval(uint8_t had_abnormal)
 {
     uint64_t raw_ms;
@@ -558,6 +579,36 @@ static void guard_adjust_sleep_interval(uint8_t had_abnormal)
     s_guard_current_sleep_interval_ms = (uint32_t)new_interval_ms;
 }
 
+/*
+ * guard_adjust_budget
+ *   每完成一次巡检（无论是否触发过 in_handling）调用一次，按本轮巡检是否
+ *   出现过非 NORMAL 状态来调整下一轮"NORMAL 持续确认时长"：
+ *     - had_abnormal != 0：增加 10%（乘以 110%），不设上限——本轮出现过
+ *       异常，说明当前确认时长可能不够保险，下一轮要求更久的连续 NORMAL
+ *       才认为真正安全；
+ *     - had_abnormal == 0：维持不变，不做任何缩短处理（只有增加，没有
+ *       减少，更安全）。
+ *   *110/100 之后大概率不是 1000 的整数倍，四舍五入到最近的整数秒后
+ *   再存回，保证 s_guard_current_budget_ms 始终是整数秒。
+ *   用 uint64_t 中间量避免 *110/100 在大数值下溢出 uint32_t。
+ */
+static void guard_adjust_budget(uint8_t had_abnormal)
+{
+    uint64_t raw_ms;
+    uint64_t new_budget_ms;
+
+    if(had_abnormal == 0U) {
+        return; /* 本轮全程 NORMAL：不缩短，维持当前值 */
+    }
+
+    raw_ms = ((uint64_t)s_guard_current_budget_ms * GUARD_ADAPTIVE_BUDGET_GROW_PCT) / 100ULL;
+
+    /* 四舍五入到最近的整数秒：小数部分 >= 0.5s 向上取整，否则向下取整。 */
+    new_budget_ms = ((raw_ms + 500ULL) / 1000ULL) * 1000ULL;
+
+    s_guard_current_budget_ms = (uint32_t)new_budget_ms;
+}
+
 static void guard_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -566,6 +617,7 @@ static void guard_task(void *pvParameters)
      * power_mode_enter_guard()，此时 s_guard_mode_active 已是 1，
      * 下面第一次外层判断会被跳过，所以在循环外先初始化一次）。 */
     s_guard_current_sleep_interval_ms = g_guard_sleep_interval_ms;
+    s_guard_current_budget_ms         = g_guard_handling_budget_ms;
 
     for( ;; ) {
             /* If guard is already active (we entered it from init_task
@@ -581,9 +633,10 @@ static void guard_task(void *pvParameters)
 
             power_mode_enter_guard();
 
-            /* 每次全新进入 guard 模式，自适应睡眠时长都从配置基准值
-             * 重新开始，不沿用上次退出 guard 前累积的缩短/放大结果。 */
+            /* 每次全新进入 guard 模式，自适应睡眠时长/确认时长都从配置
+             * 基准值重新开始，不沿用上次退出 guard 前累积的缩短/放大结果。 */
             s_guard_current_sleep_interval_ms = g_guard_sleep_interval_ms;
+            s_guard_current_budget_ms         = g_guard_handling_budget_ms;
         }
 
         while(s_guard_mode_active != 0U) {
@@ -702,6 +755,7 @@ static void guard_task(void *pvParameters)
                  * 不调整，因为本轮巡检并未正常走完。 */
                 if(aborted == 0U) {
                     guard_adjust_sleep_interval(had_abnormal);
+                    guard_adjust_budget(had_abnormal);
                 }
 
                 /* Power the board back off ONLY if nothing required action.
@@ -856,34 +910,33 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
     switch(msg_id) {
     case CAN_CFG_HIGH_TEMP_THRESHOLD:
         {
-            uint8_t integer = param[0];
-            uint8_t decimal = param[1];
-            if((integer > 100U) || (decimal > 9U)) {
+            /* Byte[2,3] = uint16_t，高字节在前，单位 0.1°C，与查询响应
+             * (CAN_QRY_THRESHOLD) 格式一致，取值范围 0~1000（0~100.0°C）。 */
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if(value > 1000U) {
                 return CAN_ACK_ILLEGAL;
             }
-            g_high_temp_threshold_tenths = (uint16_t)(integer * 10U + decimal);
+            g_high_temp_threshold_tenths = value;
         }
         return CAN_ACK_OK;
 
     case CAN_CFG_DANGER_TEMP_THRESHOLD:
         {
-            uint8_t integer = param[0];
-            uint8_t decimal = param[1];
-            if((integer > 100U) || (decimal > 9U)) {
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if(value > 1000U) {
                 return CAN_ACK_ILLEGAL;
             }
-            g_danger_temp_threshold_tenths = (uint16_t)(integer * 10U + decimal);
+            g_danger_temp_threshold_tenths = value;
         }
         return CAN_ACK_OK;
 
     case CAN_CFG_LOW_TEMP_THRESHOLD:
         {
-            uint8_t integer = param[0];
-            uint8_t decimal = param[1];
-            if((integer > 100U) || (decimal > 9U)) {
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if(value > 1000U) {
                 return CAN_ACK_ILLEGAL;
             }
-            g_low_temp_threshold_tenths = (uint16_t)(integer * 10U + decimal);
+            g_low_temp_threshold_tenths = value;
         }
         return CAN_ACK_OK;
 
@@ -921,6 +974,9 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
                 return CAN_ACK_ILLEGAL;
             }
             g_guard_handling_budget_ms = seconds * 1000U;
+            /* 同步更新自适应确认时长当前值，让配置立即生效：下次巡检
+             * 会从新的基准值开始，而不是沿用旧基准累积的放大结果。 */
+            s_guard_current_budget_ms = g_guard_handling_budget_ms;
         }
         return CAN_ACK_OK;
 

@@ -59,6 +59,10 @@ ErrStatus can_app_handle_query(uint8_t msg_id)
     case CAN_QRY_TEMP_CH3:
         s_upload_temp_ch_mask |= 0x08U;
         break;
+    case CAN_QRY_TEMP_ALL:
+        /* 一次查询，MCU依次回复4帧（CH0~CH3，帧格式与单路查询一致） */
+        s_upload_temp_ch_mask |= 0x0FU;
+        break;
     case CAN_QRY_THRESHOLD:
         s_upload_threshold_flag = 1U;
         break;
@@ -204,6 +208,7 @@ ErrStatus can_app_upload_guard_sleep(void)
 
 ErrStatus can_app_upload_guard_budget(void)
 {
-    uint16_t budget_seconds = (uint16_t)(g_guard_handling_budget_ms / 1000U);
-    return can_protocol_send_guard_budget_response(budget_seconds);
+    uint16_t base_seconds    = (uint16_t)(g_guard_handling_budget_ms / 1000U);
+    uint16_t current_seconds = (uint16_t)(app_tasks_get_guard_current_budget_ms() / 1000U);
+    return can_protocol_send_guard_budget_response(base_seconds, current_seconds);
 }
