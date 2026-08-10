@@ -58,6 +58,14 @@ extern "C" {
 #define CAN_QRY_TEMP_ALL     0x0BU  /* 4路分区温度一次性查询：MCU依次回复4帧，
                                       * 消息号仍分别回显 CAN_QRY_TEMP_CH0~CH3，
                                       * 帧格式与单路查询完全一致 */
+#define CAN_QRY_ADC_RAW      0x0CU  /* ADC原始raw值查询（气体传感器），
+                                      * 用于现场标定 fault_manager 的固定阈值，
+                                      * 标定完成后此查询可长期保留，不影响正常运行 */
+#define CAN_QRY_GAS_THRESHOLD 0x0DU /* 气体传感器故障判定区间查询（下限+上限），
+                                      * 用于核实 CAN_CFG_GAS_SENSOR_RAW_MIN/MAX
+                                      * 配置命令是否生效 */
+#define CAN_QRY_PREDICT_STATUS 0x0EU /* 异常升温预警功能状态查询：返回配置参数+告警标志 */
+#define CAN_QRY_TEMP_RATE      0x0FU /* 4路分区温度变化量查询（调试用，单位 0.1°C/帧） */
 
 /* 保留字节填充值 */
 #define CAN_RSVD_FILL   0xCCU
@@ -77,7 +85,7 @@ extern "C" {
 #define CAN_CTL_FAN          0x0BU
 #define CAN_CTL_PUMP         0x0CU
 #define CAN_CTL_GATE         0x0DU
-#define CAN_CTL_TEMP_PREDICT_ENABLE 0x0EU  /* 温度趋势预测功能使能开关 */
+#define CAN_CTL_TEMP_PREDICT_ENABLE 0x0EU  /* 异常升温预警功能使能开关 */
 
 /* 系统复位校验码 */
 #define CAN_CTL_RESET_MAGIC  0xA5A5U
@@ -92,6 +100,13 @@ extern "C" {
 #define CAN_CFG_GUARD_SLEEP_INTERVAL    0x04U
 #define CAN_CFG_GUARD_HANDLING_BUDGET   0x05U
 #define CAN_CFG_APP_TASK_PERIOD         0x06U
+#define CAN_CFG_GAS_SENSOR_RAW_MIN      0x07U  /* 气体传感器故障判定下限（ADC raw，0~4095） */
+#define CAN_CFG_GAS_SENSOR_RAW_MAX      0x08U  /* 气体传感器故障判定上限（ADC raw，0~4095） */
+#define CAN_CFG_RISE_DANGER_THRESHOLD   0x09U  /* 单次采样升温触发DANGER的阈值，Byte[2,3] uint16_t，
+                                                * 高字节在前，单位0.1°C，范围1~200，默认20（=2.0°C）*/
+#define CAN_CFG_RISE_HIGH_THRESHOLD     0x0AU  /* 单次采样升温触发HIGH_TEMP的阈值，Byte[2,3] uint16_t，
+                                                * 高字节在前，单位0.1°C，范围1~200，默认15（=1.5°C）*/
+#define CAN_CFG_RISE_CONFIRM_COUNT      0x0BU  /* 连续确认次数，Byte2 = uint8_t，范围1~10，默认2 */
 
 /* ACK 响应结果码（Byte2） */
 #define CAN_ACK_OK          0x00U
@@ -128,13 +143,14 @@ typedef struct {
 } can_system_state_data_t;
 
 typedef struct {
-    uint8_t cooler_fault;
-    uint8_t heater_fault;
-    uint8_t gas_sensor;
-    uint8_t gate_fault;
-    uint8_t fan_fault;
-    uint8_t pump_fault;
-    uint8_t press_sensor;
+    uint8_t gas_sensor;      /* 气体传感器故障（0=正常，1=故障） */
+    uint8_t cooler_rsvd;     /* 制冷片故障（预留，填0） */
+    uint8_t heater_rsvd;     /* 加热片故障（预留，填0） */
+    uint8_t temp_sensor_rsvd;/* 温度传感器故障（预留，填0） */
+    uint8_t fan_rsvd;        /* 风扇故障（预留，填0） */
+    uint8_t pump_rsvd;       /* 水泵故障（预留，填0） */
+    uint8_t gate_rsvd;       /* 排气阀故障（预留，填0） */
+    uint8_t press_sensor_rsvd; /* 气压传感器故障（预留，填0） */
 } can_fault_data_t;
 
 typedef struct {
@@ -153,17 +169,45 @@ typedef struct {
     uint16_t current_seconds;   /* 自适应算法当前实际生效的确认时长（秒），只增不减 */
 } can_guard_budget_data_t;
 
+typedef struct {
+    uint16_t gas_sensor_raw;    /* 气体传感器 ADC 原始值（PD11/ADC0_IN9，0~4095） */
+    uint16_t reserved_raw;      /* 预留字段（原制冷片电流通道已移除，0xFFFF=无效） */
+} can_adc_raw_data_t;
+
+typedef struct {
+    uint16_t raw_min;   /* 气体传感器故障判定下限（ADC raw，0~4095） */
+    uint16_t raw_max;   /* 气体传感器故障判定上限（ADC raw，0~4095） */
+} can_gas_threshold_data_t;
+
+typedef struct {
+    uint8_t enable;            /* 预警功能使能，1=开启，0=关闭 */
+    uint16_t danger_threshold; /* DANGER 升温阈值，单位 0.1°C */
+    uint16_t high_threshold;   /* HIGH_TEMP 升温阈值，单位 0.1°C */
+    uint8_t predictive_alarm;  /* 全局预警告警标志 */
+    uint8_t zone_predictive[4]; /* 各分区预警触发标志 */
+} can_predict_status_data_t;
+
+typedef struct {
+    int16_t zone_temp_delta[4]; /* 各分区温度变化量，单位 0.1°C，符号表示升降 */
+} can_temp_rate_data_t;
+
 /*
  * CAN 协议层接口 - 查询类响应发送
  */
 ErrStatus can_protocol_send_env_response(uint8_t msg_id, int16_t temp_tenths, int16_t pressure_kpa, uint8_t press_alarm, uint8_t gas_leak);
 ErrStatus can_protocol_send_state_response(uint8_t msg_id, uint8_t fan_duty, uint8_t pump_duty, uint8_t cooler_on, uint8_t gate_on);
 ErrStatus can_protocol_send_system_state_response(uint8_t msg_id, uint8_t level);
-ErrStatus can_protocol_send_fault_response(uint8_t cooler_mask, uint8_t heater_mask, uint8_t gas_sensor, uint8_t gate_fault, uint8_t fan_fault, uint8_t pump_fault, uint8_t press_sensor);
+ErrStatus can_protocol_send_fault_response(uint8_t gas_sensor, uint8_t cooler_rsvd, uint8_t heater_rsvd, uint8_t temp_sensor_rsvd, uint8_t fan_rsvd, uint8_t pump_rsvd, uint8_t gate_rsvd, uint8_t press_sensor_rsvd);
 ErrStatus can_protocol_send_temp_ch_response(uint8_t msg_id, int16_t temp_tenths);
 ErrStatus can_protocol_send_threshold_response(uint8_t msg_id, uint16_t low_temp, uint16_t high_temp, uint16_t danger_temp);
 ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t current_seconds);
 ErrStatus can_protocol_send_guard_budget_response(uint16_t base_seconds, uint16_t current_seconds);
+ErrStatus can_protocol_send_adc_raw_response(uint16_t gas_sensor_raw, uint16_t reserved_raw);
+ErrStatus can_protocol_send_gas_threshold_response(uint16_t raw_min, uint16_t raw_max);
+ErrStatus can_protocol_send_predict_status_response(uint8_t enable, uint16_t danger_threshold,
+                                                     uint16_t high_threshold, uint8_t predictive_alarm,
+                                                     const uint8_t zone_predictive[4]);
+ErrStatus can_protocol_send_temp_rate_response(uint8_t ch, int16_t delta_tenths);
 
 /*
  * CAN 协议层接口 - 控制类/配置类 ACK 响应

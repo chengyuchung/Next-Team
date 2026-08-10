@@ -224,7 +224,6 @@ static SemaphoreHandle_t s_guard_key1_sem = NULL;
 #define CAN4_RX_QUEUE_LEN    ( 8U )
 
 /* ---- flags defined elsewhere ------------------------------------------ */
-extern volatile uint8_t g_system_state_changed_flag;   /* can.c */
 extern volatile uint8_t g_key4_event;                  /* key.c */
 extern volatile uint8_t s_guard_mode_active;           /* power_mode.c */
 
@@ -367,13 +366,6 @@ static void app_task(void *pvParameters)
          * the relay follows the mode (see guard_enter / guard_exit). */
 
         thermal_control_update(now_ms);
-
-        if(g_system_state_changed_flag != 0U) {
-            g_system_state_changed_flag = 0U;
-            (void)can_upload_system_state();
-            (void)can_upload_env();
-            (void)can_upload_temp();
-        }
 
         can_process_pending_uploads();
 
@@ -687,12 +679,6 @@ static void guard_task(void *pvParameters)
                     }
                     thermal_control_update(now_ms);
 
-                    if(g_system_state_changed_flag != 0U) {
-                        g_system_state_changed_flag = 0U;
-                        (void)can_upload_system_state();
-                        (void)can_upload_env();
-                        (void)can_upload_temp();
-                    }
                     can_process_pending_uploads();
 
                     /* KEY_4 during a patrol: cut it short and exit guard mode */
@@ -728,12 +714,6 @@ static void guard_task(void *pvParameters)
                     }
                     thermal_control_update(now_ms);
 
-                    if(g_system_state_changed_flag != 0U) {
-                        g_system_state_changed_flag = 0U;
-                        (void)can_upload_system_state();
-                        (void)can_upload_env();
-                        (void)can_upload_temp();
-                    }
                     can_process_pending_uploads();
 
                     if(xSemaphoreTake(s_guard_key1_sem, 0) == pdTRUE) {
@@ -987,6 +967,69 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
                 return CAN_ACK_ILLEGAL;
             }
             g_app_task_period_ms = (uint32_t)period_ms;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_GAS_SENSOR_RAW_MIN:
+        {
+            /* Byte[2,3] = uint16_t，高字节在前，ADC raw 范围 0~4095。
+             * 下限不能超过当前上限，否则区间非法。 */
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if((value > 4095U) || (value > g_gas_sensor_raw_max)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_gas_sensor_raw_min = value;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_GAS_SENSOR_RAW_MAX:
+        {
+            /* Byte[2,3] = uint16_t，高字节在前，ADC raw 范围 0~4095。
+             * 上限不能低于当前下限，否则区间非法。 */
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if((value > 4095U) || (value < g_gas_sensor_raw_min)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_gas_sensor_raw_max = value;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_RISE_DANGER_THRESHOLD:
+        {
+            /* Byte[2,3] = uint16_t，高字节在前，单位 0.1°C，范围 1~200（即 0.1~20.0°C）。
+             * 值越小越灵敏（细微急升就触发）；值越大越保守（只有剧烈急升才触发）。
+             * 默认值 20 = 2.0°C/帧。 */
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if((value < 1U) || (value > 200U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_temp_rise_danger_threshold = value;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_RISE_HIGH_THRESHOLD:
+        {
+            /* Byte[2,3] = uint16_t，高字节在前，单位 0.1°C，范围 1~200。
+             * 应小于 DANGER 阈值；此处不强制校验，由上位机保证语义合理。
+             * 默认值 15 = 1.5°C/帧。 */
+            uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
+            if((value < 1U) || (value > 200U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_temp_rise_high_threshold = value;
+        }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_RISE_CONFIRM_COUNT:
+        {
+            /* Byte2 = uint8_t，连续确认次数，范围 1~10，默认 2。
+             * 1 = 单帧即触发（灵敏但容易误报）；
+             * 值越大需要更多连续超标帧才触发（更稳健，响应略慢）。 */
+            uint8_t value = param[0];
+            if((value < 1U) || (value > 10U)) {
+                return CAN_ACK_ILLEGAL;
+            }
+            g_temp_rise_confirm_count = value;
         }
         return CAN_ACK_OK;
 

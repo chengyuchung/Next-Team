@@ -8,6 +8,7 @@
 #include "motor_pwm_gd32.h"
 #include "main.h"
 #include "can_app.h"
+#include "BSW/Services/fault_manager.h"
 #include <string.h>
 
 /*
@@ -131,6 +132,12 @@ void thermal_control_update(uint32_t now_ms)
     }
 
     system_state_task(&input);
+
+    /* 气体传感器故障检测：读取 ADC 输出值，判断是否在正常区间，
+     * 更新连续异常计数，并缓存结果供 fault_manager_get_status()
+     *（CAN 上报等消费方）读取。必须每个控制周期都调用一次，
+     * 否则故障计数永远不会推进。 */
+    fault_manager_update();
 
     /* 应用状态机输出到执行器 */
     system_state_get_status(&status);

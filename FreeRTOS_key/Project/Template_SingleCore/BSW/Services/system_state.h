@@ -57,8 +57,8 @@ extern "C" {
  *       不同状态下建议的温度采样周期，状态越危险，采样越频繁。
  */
 #define SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C           150U /* 低温阈值：低于 15.0°C 进入低温状态。 */
-#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C          270U /* 高温阈值：达到 27.0°C 进入高温预警状态。 */
-#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             330U /* 危险阈值：达到 33.0°C 进入危险状态。 */
+#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C          350U /* 高温阈值：达到 27.0°C 进入高温预警状态。 */
+#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             400U /* 危险阈值：达到 33.0°C 进入危险状态。 */
 /*
  * 统一采样周期说明
  *   DS18B20 采用并行转换策略（启动4路 → 等待750ms → 读取数据），
@@ -68,7 +68,7 @@ extern "C" {
  *   不必随危险等级动态调整采样频率。
  */
 #define SYSTEM_STATE_DEFAULT_SAMPLE_MS             1000U /* 统一采样周期 1s */
-#define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      2U    /* 回落确认次数，需连续满足条件才允许降级。 */
+#define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      5U    /* 回落确认次数，需连续满足条件才允许降级。 */
 
 /*
  * 运行时可配置参数（通过 CAN 0x20 配置类命令动态修改）
@@ -80,12 +80,27 @@ extern uint16_t g_danger_temp_threshold_tenths; /* 危险阈值，单位 0.1°C 
 extern uint8_t g_fallback_confirm_count;        /* 回落确认次数 */
 
 /*
- * 温度趋势预测配置参数（主动预警功能）
- *   通过温度变化率预测未来温度，在达到阈值前提前触发状态升级
+ * 温度异常升温预警配置参数（简化版）
+ *   DS18B20 采样周期固定（约 1s），直接用相邻两帧温度差判断升温过快。
+ *   g_temp_prediction_enable          : 预警功能使能，1=开启，0=关闭
+ *   g_temp_rise_danger_threshold      : 触发 DANGER 的单次升温阈值，单位 0.1°C（默认 20 = 2.0°C）
+ *   g_temp_rise_high_threshold        : 触发 HIGH_TEMP 的单次升温阈值，单位 0.1°C（默认 15 = 1.5°C）
+ *   g_temp_rise_confirm_count         : 连续确认次数（连续 N 次超过阈值才触发）
  */
-extern uint8_t g_temp_prediction_enable;        /* 预测功能使能，1=开启，0=关闭 */
-extern uint8_t g_temp_prediction_horizon_s;     /* 预测时间窗口，单位秒，建议 10~30s */
-extern uint16_t g_temp_prediction_min_rate;     /* 最小触发斜率，单位 0.01°C/s，过滤噪声 */
+extern uint8_t g_temp_prediction_enable;        /* 预警功能使能，1=开启，0=关闭 */
+extern uint16_t g_temp_rise_danger_threshold;   /* DANGER 升温阈值，单位 0.1°C，默认 20 (2.0°C) */
+extern uint16_t g_temp_rise_high_threshold;     /* HIGH_TEMP 升温阈值，单位 0.1°C，默认 15 (1.5°C) */
+extern uint8_t g_temp_rise_confirm_count;       /* 连续确认次数，默认 2 */
+
+/*
+ * 制冷片轮转配置参数
+ *   DANGER 状态下多路制冷片需要工作时，为避免电池供电不足，
+ *   每次只驱动一路，按固定间隔循环切换。
+ *   g_cooler_rotate_interval_ms : 轮转切换间隔（毫秒），默认 5000ms（5秒）。
+ *                                 设为 0 表示禁用轮转（恢复全开）。
+ */
+#define SYSTEM_STATE_DEFAULT_COOLER_ROTATE_MS    5000U
+extern uint32_t g_cooler_rotate_interval_ms;
 
 /*
  * system_state_t
@@ -151,9 +166,9 @@ typedef struct {
     uint8_t buzzer_enable;
     uint8_t ignition_allowed;     /* 点火许可，DANGER 状态下强制为0 */
     uint32_t next_temperature_sample_interval_ms;
-    uint8_t predictive_alarm;     /* 温度趋势预警标志：任一分区预测将突破阈值 */
-    uint8_t zone_predictive[4];   /* 各分区预测触发标志，1=该分区触发预测升级 */
-    int16_t zone_temp_rate[4];    /* 各分区温度变化率，单位 0.01°C/s，符号表示升降 */
+    uint8_t predictive_alarm;     /* 温度异常升温预警标志：任一分区升温过快 */
+    uint8_t zone_predictive[4];   /* 各分区预警触发标志，1=该分区触发异常升温预警 */
+    int16_t zone_temp_delta[4];   /* 各分区温度变化量，单位 0.1°C，正值=升温，负值=降温 */
 } system_state_status_t;
 
 /*

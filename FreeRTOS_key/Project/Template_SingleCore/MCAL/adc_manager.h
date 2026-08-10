@@ -32,16 +32,15 @@ extern "C" {
  *   - ADC_CH_MAX  : 通道总数（边界标识）
  *
  * 硬件映射（GD32A7xx）：
- *   - ADC_CH_IN12 : PH8 / ADC0_IN12
- *   - ADC_CH_IN13 : PH7 / ADC0_IN13
+ *   - ADC_CH_IN9  : PD11 / ADC0_IN9（需 CLTCFG 将驱动引脚切换到 PD11，
+ *                   默认引脚为 PG7，见 adc_manager.c 中的说明）
  *
  * 注意：
  *   - 增删通道时，需同步修改 adc_manager.c 中的硬件配置表；
- *   - 业务逻辑命名（如 GAS_SENSOR、COOLER_CURRENT）应在 BSW/EcuAL 层定义。
+ *   - 业务逻辑命名（如 GAS_SENSOR）应在 BSW/EcuAL 层定义。
  */
 typedef enum {
-    ADC_CH_IN12 = 0U,   /* PH8 / ADC0_IN12 */
-    ADC_CH_IN13,        /* PH7 / ADC0_IN13 */
+    ADC_CH_IN9 = 0U,    /* PD11 / ADC0_IN9 */
     ADC_CH_MAX          /* 通道总数（边界标识） */
 } adc_channel_t;
 
