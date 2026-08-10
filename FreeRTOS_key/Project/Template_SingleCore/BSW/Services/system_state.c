@@ -14,10 +14,11 @@ uint8_t g_fallback_confirm_count        = SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_
  * 温度异常升温预警配置参数（简化版）
  *   DS18B20 采样周期固定（约 1s），直接用相邻两帧温度差判断升温过快，
  *   不再需要时间戳与 EMA 平滑。
+ *   阈值单位 0.01°C，可检测细微温度变化。
  */
 uint8_t g_temp_prediction_enable        = 1U;   /* 默认开启 */
-uint16_t g_temp_rise_danger_threshold   = 20U;  /* 单次升温 >= 2.0°C 视为异常，直接判 DANGER 级别 */
-uint16_t g_temp_rise_high_threshold     = 15U;  /* 单次升温 >= 1.5°C 视为偏快，判 HIGH_TEMP 级别 */
+uint16_t g_temp_rise_danger_threshold   = 30U;  /* 单次升温 >= 0.30°C 视为异常，直接判 DANGER 级别 */
+uint16_t g_temp_rise_high_threshold     = 15U;  /* 单次升温 >= 0.15°C 视为偏快，判 HIGH_TEMP 级别 */
 uint8_t g_temp_rise_confirm_count       = 2U;   /* 连续 2 帧都超过阈值才触发，过滤单点噪声 */
 
 /*
@@ -390,8 +391,9 @@ static void system_state_update_temp_delta(const system_state_input_t *input)
         /* 更新输出快照（供 CAN 上报查看） */
         s_status.zone_temp_delta[zone_idx] = delta;
 
-        /* 更新异常升温连续计数器 */
-        if(delta >= (int16_t)g_temp_rise_danger_threshold) {
+        /* 更新异常升温连续计数器
+         * delta 单位是 0.1°C，阈值单位是 0.01°C，需要将 delta * 10 后比较 */
+        if((delta * 10) >= (int16_t)g_temp_rise_danger_threshold) {
             if(s_zone_rise_danger_count[zone_idx] < 0xFFU) {
                 s_zone_rise_danger_count[zone_idx]++;
             }
@@ -399,7 +401,7 @@ static void system_state_update_temp_delta(const system_state_input_t *input)
             s_zone_rise_danger_count[zone_idx] = 0U;
         }
 
-        if(delta >= (int16_t)g_temp_rise_high_threshold) {
+        if((delta * 10) >= (int16_t)g_temp_rise_high_threshold) {
             if(s_zone_rise_high_count[zone_idx] < 0xFFU) {
                 s_zone_rise_high_count[zone_idx]++;
             }
@@ -416,7 +418,7 @@ static void system_state_update_temp_delta(const system_state_input_t *input)
  *   判断指定分区是否满足"异常急速升温→DANGER级别"预警条件。
  *
  * 规则：预警功能开启，且连续 g_temp_rise_confirm_count 帧升温量
- *       均超过 g_temp_rise_danger_threshold（默认 2.0°C/帧）。
+ *       均超过 g_temp_rise_danger_threshold（单位 0.01°C，默认 30 = 0.30°C/帧）。
  *
  * 返回值
  *   1 = 触发预警，需提前升级到 DANGER
@@ -440,7 +442,7 @@ static uint8_t system_state_zone_predict_danger(const system_state_input_t *inpu
  *   判断指定分区是否满足"升温偏快→HIGH_TEMP级别"预警条件。
  *
  * 规则：预警功能开启，且连续 g_temp_rise_confirm_count 帧升温量
- *       均超过 g_temp_rise_high_threshold（默认 1.5°C/帧）。
+ *       均超过 g_temp_rise_high_threshold（单位 0.01°C，默认 15 = 0.15°C/帧）。
  *
  * 返回值
  *   1 = 触发预警，需提前升级到 HIGH_TEMP
