@@ -83,13 +83,13 @@ extern uint8_t g_fallback_confirm_count;        /* 回落确认次数 */
  * 温度异常升温预警配置参数（简化版）
  *   DS18B20 采样周期固定（约 1s），直接用相邻两帧温度差判断升温过快。
  *   g_temp_prediction_enable          : 预警功能使能，1=开启，0=关闭
- *   g_temp_rise_danger_threshold      : 触发 DANGER 的单次升温阈值，单位 0.1°C（默认 20 = 2.0°C）
- *   g_temp_rise_high_threshold        : 触发 HIGH_TEMP 的单次升温阈值，单位 0.1°C（默认 15 = 1.5°C）
+ *   g_temp_rise_danger_threshold      : 触发 DANGER 的单次升温阈值，单位 0.01°C（默认 30 = 0.30°C）
+ *   g_temp_rise_high_threshold        : 触发 HIGH_TEMP 的单次升温阈值，单位 0.01°C（默认 15 = 0.15°C）
  *   g_temp_rise_confirm_count         : 连续确认次数（连续 N 次超过阈值才触发）
  */
 extern uint8_t g_temp_prediction_enable;        /* 预警功能使能，1=开启，0=关闭 */
-extern uint16_t g_temp_rise_danger_threshold;   /* DANGER 升温阈值，单位 0.1°C，默认 20 (2.0°C) */
-extern uint16_t g_temp_rise_high_threshold;     /* HIGH_TEMP 升温阈值，单位 0.1°C，默认 15 (1.5°C) */
+extern uint16_t g_temp_rise_danger_threshold;   /* DANGER 升温阈值，单位 0.01°C，默认 30 (0.30°C) */
+extern uint16_t g_temp_rise_high_threshold;     /* HIGH_TEMP 升温阈值，单位 0.01°C，默认 15 (0.15°C) */
 extern uint8_t g_temp_rise_confirm_count;       /* 连续确认次数，默认 2 */
 
 /*
@@ -99,7 +99,7 @@ extern uint8_t g_temp_rise_confirm_count;       /* 连续确认次数，默认 2
  *   g_cooler_rotate_interval_ms : 轮转切换间隔（毫秒），默认 5000ms（5秒）。
  *                                 设为 0 表示禁用轮转（恢复全开）。
  */
-#define SYSTEM_STATE_DEFAULT_COOLER_ROTATE_MS    5000U
+#define SYSTEM_STATE_DEFAULT_COOLER_ROTATE_MS    1000U
 extern uint32_t g_cooler_rotate_interval_ms;
 
 /*
@@ -166,9 +166,11 @@ typedef struct {
     uint8_t buzzer_enable;
     uint8_t ignition_allowed;     /* 点火许可，DANGER 状态下强制为0 */
     uint32_t next_temperature_sample_interval_ms;
-    uint8_t predictive_alarm;     /* 温度异常升温预警标志：任一分区升温过快 */
-    uint8_t zone_predictive[4];   /* 各分区预警触发标志，1=该分区触发异常升温预警 */
-    int16_t zone_temp_delta[4];   /* 各分区温度变化量，单位 0.1°C，正值=升温，负值=降温 */
+    uint8_t predictive_alarm;     /* 温度异常升温预警标志：任一分区升温过快（仅本轮有效，瞬时） */
+    uint8_t zone_predictive[4];   /* 各分区预警触发标志，1=该分区触发异常升温预警（仅本轮有效，瞬时） */
+    uint8_t zone_predict_trigger_count[4]; /* 各分区历史累计触发次数（饱和于255），
+                                            * 只在"未触发→触发"的跳变时刻+1，用于故障回溯；
+                                            * 可通过 CAN 配置命令 CAN_CFG_CLEAR_PREDICT_HISTORY 清零。 */
 } system_state_status_t;
 
 /*
@@ -241,6 +243,7 @@ typedef struct {
  */
 void system_state_init(void);
 void system_state_reset(void);
+void system_state_clear_predict_history(void);  /* 仅清除历史触发次数，不复位状态机 */
 void system_state_task(const system_state_input_t *input);
 void system_state_get_status(system_state_status_t *status);
 void system_state_get_input(system_state_input_t *input);

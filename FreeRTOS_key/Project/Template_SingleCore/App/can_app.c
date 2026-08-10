@@ -28,7 +28,6 @@ static volatile uint8_t s_upload_guard_budget_flag = 0U;
 static volatile uint8_t s_upload_adc_raw_flag = 0U;
 static volatile uint8_t s_upload_gas_threshold_flag = 0U;
 static volatile uint8_t s_upload_predict_status_flag = 0U;
-static volatile uint8_t s_upload_temp_rate_flag = 0U;
 
 void can_app_init(void)
 {
@@ -85,9 +84,6 @@ ErrStatus can_app_handle_query(uint8_t msg_id)
         break;
     case CAN_QRY_PREDICT_STATUS:
         s_upload_predict_status_flag = 1U;
-        break;
-    case CAN_QRY_TEMP_RATE:
-        s_upload_temp_rate_flag = 1U;
         break;
     default:
         return ERROR;
@@ -151,11 +147,6 @@ void can_app_process_pending_uploads(void)
     if(s_upload_predict_status_flag != 0U) {
         s_upload_predict_status_flag = 0U;
         (void)can_app_upload_predict_status();
-    }
-
-    if(s_upload_temp_rate_flag != 0U) {
-        s_upload_temp_rate_flag = 0U;
-        (void)can_app_upload_temp_rate();
     }
 }
 
@@ -288,25 +279,5 @@ ErrStatus can_app_upload_predict_status(void)
     system_state_get_status(&status);
     return can_protocol_send_predict_status_response(
         g_temp_prediction_enable,
-        g_temp_rise_danger_threshold,
-        g_temp_rise_high_threshold,
-        status.predictive_alarm,
-        status.zone_predictive);
-}
-
-ErrStatus can_app_upload_temp_rate(void)
-{
-    system_state_status_t status;
-    ErrStatus ret = SUCCESS;
-    uint8_t ch;
-
-    system_state_get_status(&status);
-
-    /* 逐路上报，每帧携带一路分区号+变化量，上位机按 Byte2 分区号区分 */
-    for(ch = 0U; ch < 4U; ch++) {
-        if(can_protocol_send_temp_rate_response(ch, status.zone_temp_delta[ch]) != SUCCESS) {
-            ret = ERROR;
-        }
-    }
-    return ret;
+        status.zone_predict_trigger_count);
 }

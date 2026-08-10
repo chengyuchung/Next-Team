@@ -276,54 +276,27 @@ ErrStatus can_protocol_send_gas_threshold_response(uint16_t raw_min, uint16_t ra
  *   Byte0      源节点（0x20=MCU）
  *   Byte1      消息号（回显 CAN_QRY_PREDICT_STATUS）
  *   Byte2      使能标志（1=开启，0=关闭）
- *   Byte[3,4]  DANGER 升温阈值 uint16_t，高字节在前，单位 0.1°C
- *   Byte[5,6]  HIGH_TEMP 升温阈值 uint16_t，高字节在前，单位 0.1°C
- *   Byte7      全局预警告警标志（bit7=全局，bit0~3=zone0~3）
+ *   Byte3      分区0历史累计触发次数（饱和于255）
+ *   Byte4      分区1历史累计触发次数（饱和于255）
+ *   Byte5      分区2历史累计触发次数（饱和于255）
+ *   Byte6      分区3历史累计触发次数（饱和于255）
+ *   Byte7      预留，填 0xCC
+ *
+ * 用途：上位机借助此命令确认预警功能是否真的在起作用（历史触发次数
+ *       是否随时间推进而增长），比单纯查看瞬时告警标志更可靠。
+ *       计数可通过 CAN_CFG_CLEAR_PREDICT_HISTORY 配置命令清零。
  */
-ErrStatus can_protocol_send_predict_status_response(uint8_t enable, uint16_t danger_threshold,
-                                                     uint16_t high_threshold, uint8_t predictive_alarm,
-                                                     const uint8_t zone_predictive[4])
+ErrStatus can_protocol_send_predict_status_response(uint8_t enable, const uint8_t zone_trigger_count[4])
 {
     uint8_t data[8] = {0};
 
     data[0] = CAN_NODE_MCU;
     data[1] = CAN_QRY_PREDICT_STATUS;
     data[2] = enable;
-    data[3] = (uint8_t)(danger_threshold >> 8);
-    data[4] = (uint8_t)(danger_threshold & 0xFFU);
-    data[5] = (uint8_t)(high_threshold >> 8);
-    data[6] = (uint8_t)(high_threshold & 0xFFU);
-    data[7] = (uint8_t)((predictive_alarm ? 0x80U : 0U) |
-                        (zone_predictive[0] ? 0x01U : 0U) |
-                        (zone_predictive[1] ? 0x02U : 0U) |
-                        (zone_predictive[2] ? 0x04U : 0U) |
-                        (zone_predictive[3] ? 0x08U : 0U));
-
-    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
-}
-
-/*
- * can_protocol_send_temp_rate_response - 单个分区温度变化量查询响应
- *   (ID: 0x188, Byte0=CAN_NODE_MCU)
- *   Byte0      源节点（0x20=MCU）
- *   Byte1      消息号（回显 CAN_QRY_TEMP_RATE）
- *   Byte2      分区号（0~3）
- *   Byte[3,4]  温度变化量 int16_t，高字节在前，单位 0.1°C（符号表示升降）
- *   Byte5~7    预留，填 0xCC
- *
- * 用途：调试每帧升温幅度，负值表示降温，正值表示升温。
- */
-ErrStatus can_protocol_send_temp_rate_response(uint8_t ch, int16_t delta_tenths)
-{
-    uint8_t data[8] = {0};
-
-    data[0] = CAN_NODE_MCU;
-    data[1] = CAN_QRY_TEMP_RATE;
-    data[2] = ch;
-    data[3] = (uint8_t)((uint16_t)delta_tenths >> 8);
-    data[4] = (uint8_t)((uint16_t)delta_tenths & 0xFFU);
-    data[5] = CAN_RSVD_FILL;
-    data[6] = CAN_RSVD_FILL;
+    data[3] = zone_trigger_count[0];
+    data[4] = zone_trigger_count[1];
+    data[5] = zone_trigger_count[2];
+    data[6] = zone_trigger_count[3];
     data[7] = CAN_RSVD_FILL;
 
     return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);

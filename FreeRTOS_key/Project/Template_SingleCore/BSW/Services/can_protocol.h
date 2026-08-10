@@ -64,8 +64,9 @@ extern "C" {
 #define CAN_QRY_GAS_THRESHOLD 0x0DU /* 气体传感器故障判定区间查询（下限+上限），
                                       * 用于核实 CAN_CFG_GAS_SENSOR_RAW_MIN/MAX
                                       * 配置命令是否生效 */
-#define CAN_QRY_PREDICT_STATUS 0x0EU /* 异常升温预警功能状态查询：返回配置参数+告警标志 */
-#define CAN_QRY_TEMP_RATE      0x0FU /* 4路分区温度变化量查询（调试用，单位 0.1°C/帧） */
+#define CAN_QRY_PREDICT_STATUS 0x0EU /* 异常升温预警功能状态查询：返回使能标志+
+                                      * 4个分区历史累计触发次数（饱和于255），
+                                      * 用于确认预警功能是否真的在起作用 */
 
 /* 保留字节填充值 */
 #define CAN_RSVD_FILL   0xCCU
@@ -103,10 +104,13 @@ extern "C" {
 #define CAN_CFG_GAS_SENSOR_RAW_MIN      0x07U  /* 气体传感器故障判定下限（ADC raw，0~4095） */
 #define CAN_CFG_GAS_SENSOR_RAW_MAX      0x08U  /* 气体传感器故障判定上限（ADC raw，0~4095） */
 #define CAN_CFG_RISE_DANGER_THRESHOLD   0x09U  /* 单次采样升温触发DANGER的阈值，Byte[2,3] uint16_t，
-                                                * 高字节在前，单位0.1°C，范围1~200，默认20（=2.0°C）*/
+                                                * 高字节在前，单位0.01°C，范围1~200，默认30（=0.30°C）*/
 #define CAN_CFG_RISE_HIGH_THRESHOLD     0x0AU  /* 单次采样升温触发HIGH_TEMP的阈值，Byte[2,3] uint16_t，
-                                                * 高字节在前，单位0.1°C，范围1~200，默认15（=1.5°C）*/
+                                                * 高字节在前，单位0.01°C，范围1~200，默认15（=0.15°C）*/
 #define CAN_CFG_RISE_CONFIRM_COUNT      0x0BU  /* 连续确认次数，Byte2 = uint8_t，范围1~10，默认2 */
+#define CAN_CFG_CLEAR_PREDICT_HISTORY   0x0CU  /* 清除4个分区的升温预警历史累计触发次数，
+                                                * 无需参数（Byte2~7忽略），仅清计数，
+                                                * 不影响状态机当前运行状态 */
 
 /* ACK 响应结果码（Byte2） */
 #define CAN_ACK_OK          0x00U
@@ -180,16 +184,9 @@ typedef struct {
 } can_gas_threshold_data_t;
 
 typedef struct {
-    uint8_t enable;            /* 预警功能使能，1=开启，0=关闭 */
-    uint16_t danger_threshold; /* DANGER 升温阈值，单位 0.1°C */
-    uint16_t high_threshold;   /* HIGH_TEMP 升温阈值，单位 0.1°C */
-    uint8_t predictive_alarm;  /* 全局预警告警标志 */
-    uint8_t zone_predictive[4]; /* 各分区预警触发标志 */
+    uint8_t enable;                       /* 预警功能使能，1=开启，0=关闭 */
+    uint8_t zone_trigger_count[4];         /* 各分区历史累计触发次数（饱和于255） */
 } can_predict_status_data_t;
-
-typedef struct {
-    int16_t zone_temp_delta[4]; /* 各分区温度变化量，单位 0.1°C，符号表示升降 */
-} can_temp_rate_data_t;
 
 /*
  * CAN 协议层接口 - 查询类响应发送
@@ -204,10 +201,7 @@ ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t
 ErrStatus can_protocol_send_guard_budget_response(uint16_t base_seconds, uint16_t current_seconds);
 ErrStatus can_protocol_send_adc_raw_response(uint16_t gas_sensor_raw, uint16_t reserved_raw);
 ErrStatus can_protocol_send_gas_threshold_response(uint16_t raw_min, uint16_t raw_max);
-ErrStatus can_protocol_send_predict_status_response(uint8_t enable, uint16_t danger_threshold,
-                                                     uint16_t high_threshold, uint8_t predictive_alarm,
-                                                     const uint8_t zone_predictive[4]);
-ErrStatus can_protocol_send_temp_rate_response(uint8_t ch, int16_t delta_tenths);
+ErrStatus can_protocol_send_predict_status_response(uint8_t enable, const uint8_t zone_trigger_count[4]);
 
 /*
  * CAN 协议层接口 - 控制类/配置类 ACK 响应

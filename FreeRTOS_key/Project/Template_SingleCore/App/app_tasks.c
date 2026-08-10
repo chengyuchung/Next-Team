@@ -996,9 +996,9 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
 
     case CAN_CFG_RISE_DANGER_THRESHOLD:
         {
-            /* Byte[2,3] = uint16_t，高字节在前，单位 0.1°C，范围 1~200（即 0.1~20.0°C）。
+            /* Byte[2,3] = uint16_t，高字节在前，单位 0.01°C，范围 1~200（即 0.01~2.00°C）。
              * 值越小越灵敏（细微急升就触发）；值越大越保守（只有剧烈急升才触发）。
-             * 默认值 20 = 2.0°C/帧。 */
+             * 默认值 30 = 0.30°C/帧。 */
             uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
             if((value < 1U) || (value > 200U)) {
                 return CAN_ACK_ILLEGAL;
@@ -1009,9 +1009,9 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
 
     case CAN_CFG_RISE_HIGH_THRESHOLD:
         {
-            /* Byte[2,3] = uint16_t，高字节在前，单位 0.1°C，范围 1~200。
+            /* Byte[2,3] = uint16_t，高字节在前，单位 0.01°C，范围 1~200。
              * 应小于 DANGER 阈值；此处不强制校验，由上位机保证语义合理。
-             * 默认值 15 = 1.5°C/帧。 */
+             * 默认值 15 = 0.15°C/帧。 */
             uint16_t value = (uint16_t)(((uint16_t)param[0] << 8) | (uint16_t)param[1]);
             if((value < 1U) || (value > 200U)) {
                 return CAN_ACK_ILLEGAL;
@@ -1031,6 +1031,12 @@ static uint8_t can_handle_config(uint8_t msg_id, const uint8_t *param)
             }
             g_temp_rise_confirm_count = value;
         }
+        return CAN_ACK_OK;
+
+    case CAN_CFG_CLEAR_PREDICT_HISTORY:
+        /* 无需参数，仅清除4个分区的升温预警历史累计触发次数，
+         * 不影响状态机当前运行状态。 */
+        system_state_clear_predict_history();
         return CAN_ACK_OK;
 
     default:

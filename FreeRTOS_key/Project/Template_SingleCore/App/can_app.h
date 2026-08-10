@@ -211,20 +211,11 @@ ErrStatus can_app_upload_gas_threshold(void);
 
 /*
  * 函数名称 : can_app_upload_predict_status
- * 功能描述 : 上报温度预测功能当前状态（使能标志+配置参数+告警标志），
- *           用于调试确认预测功能是否正常工作。
+ * 功能描述 : 上报温度预测功能当前状态（使能标志+4个分区历史累计触发次数），
+ *           用于确认预警功能是否真的起作用。
  * 返 回 值 : SUCCESS / ERROR
  */
 ErrStatus can_app_upload_predict_status(void);
-
-/*
- * 函数名称 : can_app_upload_temp_rate
- * 功能描述 : 上报4路分区温度变化率（单位 0.01°C/s，符号表示升降），
- *           每路单独一帧（Byte2=分区号，Byte[3,4]=斜率），用于调试
- *           确认斜率计算是否正确，是预测不触发时的首要排查手段。
- * 返 回 值 : SUCCESS / ERROR
- */
-ErrStatus can_app_upload_temp_rate(void);
 
 /* 兼容旧代码的宏定义 */
 #define can_handle_query               can_app_handle_query

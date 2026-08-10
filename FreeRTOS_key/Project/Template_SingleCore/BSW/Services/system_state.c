@@ -16,9 +16,9 @@ uint8_t g_fallback_confirm_count        = SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_
  *   不再需要时间戳与 EMA 平滑。
  *   阈值单位 0.01°C，可检测细微温度变化。
  */
-uint8_t g_temp_prediction_enable        = 1U;   /* 默认开启 */
-uint16_t g_temp_rise_danger_threshold   = 30U;  /* 单次升温 >= 0.30°C 视为异常，直接判 DANGER 级别 */
-uint16_t g_temp_rise_high_threshold     = 15U;  /* 单次升温 >= 0.15°C 视为偏快，判 HIGH_TEMP 级别 */
+uint8_t g_temp_prediction_enable        = 0U;   /* 默认关闭 */
+uint16_t g_temp_rise_danger_threshold   = 300U;  /* 单次升温 >= 0.30°C 视为异常，直接判 DANGER 级别 */
+uint16_t g_temp_rise_high_threshold     = 20U;  /* 单次升温 >= 0.15°C 视为偏快，判 HIGH_TEMP 级别 */
 uint8_t g_temp_rise_confirm_count       = 2U;   /* 连续 2 帧都超过阈值才触发，过滤单点噪声 */
 
 /*
@@ -93,6 +93,14 @@ static int16_t s_zone_prev_temp[4] = {0, 0, 0, 0};
 static uint8_t s_zone_prev_valid[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_rise_danger_count[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_rise_high_count[4] = {0U, 0U, 0U, 0U};
+
+/*
+ * s_zone_predict_prev_triggered[i]
+ *   分区 i 上一轮预警是否处于触发状态，用于边缘检测：
+ *   只在"未触发→触发"的跳变时刻才累加 s_status.zone_predict_trigger_count[i]，
+ *   避免持续触发期间重复计数。
+ */
+static uint8_t s_zone_predict_prev_triggered[4] = {0U, 0U, 0U, 0U};
 
 
 
@@ -387,9 +395,6 @@ static void system_state_update_temp_delta(const system_state_input_t *input)
         }
 
         delta = (int16_t)(current_temp - s_zone_prev_temp[zone_idx]);
-
-        /* 更新输出快照（供 CAN 上报查看） */
-        s_status.zone_temp_delta[zone_idx] = delta;
 
         /* 更新异常升温连续计数器
          * delta 单位是 0.1°C，阈值单位是 0.01°C，需要将 delta * 10 后比较 */
@@ -724,6 +729,7 @@ void system_state_init(void)
         s_zone_prev_valid[i] = 0U;
         s_zone_rise_danger_count[i] = 0U;
         s_zone_rise_high_count[i] = 0U;
+        s_zone_predict_prev_triggered[i] = 0U;
     }
 
     /* 复位制冷片轮转状态 */
@@ -769,6 +775,7 @@ void system_state_reset(void)
         s_zone_prev_valid[i] = 0U;
         s_zone_rise_danger_count[i] = 0U;
         s_zone_rise_high_count[i] = 0U;
+        s_zone_predict_prev_triggered[i] = 0U;
     }
 
     /* 复位制冷片轮转状态 */
@@ -778,6 +785,20 @@ void system_state_reset(void)
     /* 标记系统已完成初始化 */
     s_last_input_valid = 0U;
     s_initialized = 1U;
+}
+
+/*
+ * system_state_clear_predict_history
+ *   仅清除4个分区的升温预警历史累计触发次数，不影响状态机当前
+ *   运行状态（不复位 zone_state / 回落计数器 / 制冷片轮转等）。
+ *   用于配合 CAN_CFG_CLEAR_PREDICT_HISTORY 配置命令。
+ */
+void system_state_clear_predict_history(void)
+{
+    uint8_t i;
+    for(i = 0U; i < 4U; i++) {
+        s_status.zone_predict_trigger_count[i] = 0U;
+    }
 }
 
 
@@ -837,6 +858,17 @@ void system_state_task(const system_state_input_t *input)
         if((predict_danger != 0U) || (predict_high != 0U)) {
             s_status.zone_predictive[zone_idx] = 1U;
             s_status.predictive_alarm = 1U;
+
+            /* 边缘检测：仅在"未触发→触发"的跳变时刻累加历史计数，
+             * 避免持续触发（比如手一直捂着）期间每轮都+1。 */
+            if(s_zone_predict_prev_triggered[zone_idx] == 0U) {
+                if(s_status.zone_predict_trigger_count[zone_idx] < 0xFFU) {
+                    s_status.zone_predict_trigger_count[zone_idx]++;
+                }
+            }
+            s_zone_predict_prev_triggered[zone_idx] = 1U;
+        } else {
+            s_zone_predict_prev_triggered[zone_idx] = 0U;
         }
 
         system_state_zone_task(zone_idx, input, has_danger_i, has_high_i, has_low_i);
