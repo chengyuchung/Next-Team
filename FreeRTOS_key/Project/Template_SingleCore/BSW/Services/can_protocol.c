@@ -80,30 +80,33 @@ ErrStatus can_protocol_send_system_state_response(uint8_t msg_id, uint8_t level)
  *
  * Byte0  源节点（CAN_NODE_MCU）
  * Byte1  消息号（CAN_QRY_FLT = 0x03）
- * Byte2  [7:4] cooler_mask  制冷片故障掩码（bit0~3 = 1~4号片）
- *        [3:0] heater_mask  加热片故障掩码（bit0~3 = 1~4号片）
- * Byte3  [7:4] gas_sensor   气体传感器故障（bit0）
- *        [3:0] gate_fault   排气阀故障（bit0）
- * Byte4  [7:4] fan_fault    风扇故障（bit0）
- *        [3:0] pump_fault   水泵故障（bit0）
- * Byte5  [7:4] press_sensor 气压传感器故障（bit0）
- *        [3:0] 预留，填 0xC
- * Byte6~7 预留，填 0xCC
+ * Byte2  气体传感器故障（0=正常，1=故障）
+ * Byte3  制冷片故障（预留，填 0）
+ * Byte4  加热片故障（预留，填 0）
+ * Byte5  温度传感器故障（预留，填 0）
+ * Byte6  [7:4] 风扇故障（预留，填 0）
+ *        [3:0] 水泵故障（预留，填 0）
+ * Byte7  [7:4] 排气阀故障（预留，填 0）
+ *        [3:0] 气压传感器故障（预留，填 0）
  */
-ErrStatus can_protocol_send_fault_response(uint8_t cooler_mask, uint8_t heater_mask,
-                                   uint8_t gas_sensor, uint8_t gate_fault,
-                                   uint8_t fan_fault, uint8_t pump_fault,
-                                   uint8_t press_sensor)
+ErrStatus can_protocol_send_fault_response(uint8_t gas_sensor,
+                                   uint8_t cooler_rsvd,
+                                   uint8_t heater_rsvd,
+                                   uint8_t temp_sensor_rsvd,
+                                   uint8_t fan_rsvd,
+                                   uint8_t pump_rsvd,
+                                   uint8_t gate_rsvd,
+                                   uint8_t press_sensor_rsvd)
 {
     uint8_t data[8] = {0};
     data[0] = CAN_NODE_MCU;
     data[1] = CAN_QRY_FLT;
-    data[2] = (uint8_t)(((cooler_mask & 0x0FU) << 4) | (heater_mask & 0x0FU));
-    data[3] = (uint8_t)(((gas_sensor  & 0x01U) << 4) | (gate_fault  & 0x01U));
-    data[4] = (uint8_t)(((fan_fault   & 0x01U) << 4) | (pump_fault  & 0x01U));
-    data[5] = (uint8_t)(((press_sensor & 0x01U) << 4) | 0x0CU);
-    data[6] = CAN_RSVD_FILL;
-    data[7] = CAN_RSVD_FILL;
+    data[2] = (gas_sensor & 0x01U);
+    data[3] = (cooler_rsvd & 0x01U);
+    data[4] = (heater_rsvd & 0x01U);
+    data[5] = (temp_sensor_rsvd & 0x01U);
+    data[6] = (uint8_t)(((fan_rsvd & 0x01U) << 4) | (pump_rsvd & 0x01U));
+    data[7] = (uint8_t)(((gate_rsvd & 0x01U) << 4) | (press_sensor_rsvd & 0x01U));
     return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
 }
 
@@ -183,19 +186,21 @@ ErrStatus can_protocol_send_guard_sleep_response(uint16_t base_seconds, uint16_t
  *   (ID: 0x188, Byte0=CAN_NODE_MCU)
  *   Byte0      源节点（0x20=MCU）
  *   Byte1      消息号（回显 CAN_QRY_GUARD_BUDGET）
- *   Byte[2,3]  确认时长 uint16_t，高字节在前，单位：秒（对应 g_guard_handling_budget_ms）
- *   Byte4~7    预留，填 0xCC
+ *   Byte[2,3]  基准值 uint16_t，高字节在前，单位：秒（对应 g_guard_handling_budget_ms）
+ *   Byte[4,5]  当前生效值 uint16_t，高字节在前，单位：秒（自适应算法实时结果，
+ *              只增不减：本轮巡检出现过非 NORMAL 就增加 10%）
+ *   Byte6~7    预留，填 0xCC
  */
-ErrStatus can_protocol_send_guard_budget_response(uint16_t budget_seconds)
+ErrStatus can_protocol_send_guard_budget_response(uint16_t base_seconds, uint16_t current_seconds)
 {
     uint8_t data[8] = {0};
 
     data[0] = CAN_NODE_MCU;
     data[1] = CAN_QRY_GUARD_BUDGET;
-    data[2] = (uint8_t)(budget_seconds >> 8);
-    data[3] = (uint8_t)(budget_seconds & 0xFFU);
-    data[4] = CAN_RSVD_FILL;
-    data[5] = CAN_RSVD_FILL;
+    data[2] = (uint8_t)(base_seconds >> 8);
+    data[3] = (uint8_t)(base_seconds & 0xFFU);
+    data[4] = (uint8_t)(current_seconds >> 8);
+    data[5] = (uint8_t)(current_seconds & 0xFFU);
     data[6] = CAN_RSVD_FILL;
     data[7] = CAN_RSVD_FILL;
 
@@ -211,6 +216,92 @@ ErrStatus can_protocol_send_guard_budget_response(uint16_t budget_seconds)
  *   Byte4  当前系统状态等级
  *   Byte5~7 保留
  */
+/*
+ * can_protocol_send_adc_raw_response - ADC原始raw值查询响应 (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_ADC_RAW）
+ *   Byte[2,3]  气体传感器 ADC raw uint16_t，高字节在前（PD11/ADC0_IN9，0~4095）
+ *   Byte[4,5]  预留字段（原制冷片电流通道已移除，填 0xFFFF 表示无效）
+ *   Byte6~7    预留，填 0xCC
+ *
+ * 用途：现场标定 fault_manager 固定阈值时，通过此帧直接读取气体传感器 ADC
+ * 实测原始值，不依赖调试器。
+ */
+ErrStatus can_protocol_send_adc_raw_response(uint16_t gas_sensor_raw, uint16_t reserved_raw)
+{
+    uint8_t data[8] = {0};
+
+    data[0] = CAN_NODE_MCU;
+    data[1] = CAN_QRY_ADC_RAW;
+    data[2] = (uint8_t)(gas_sensor_raw >> 8);
+    data[3] = (uint8_t)(gas_sensor_raw & 0xFFU);
+    data[4] = (uint8_t)(reserved_raw >> 8);
+    data[5] = (uint8_t)(reserved_raw & 0xFFU);
+    data[6] = CAN_RSVD_FILL;
+    data[7] = CAN_RSVD_FILL;
+
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
+}
+
+/*
+ * can_protocol_send_gas_threshold_response - 气体传感器故障判定区间查询响应
+ *   (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_GAS_THRESHOLD）
+ *   Byte[2,3]  下限 uint16_t，高字节在前（ADC raw，0~4095）
+ *   Byte[4,5]  上限 uint16_t，高字节在前（ADC raw，0~4095）
+ *   Byte6~7    预留，填 0xCC
+ *
+ * 用途：核实 CAN_CFG_GAS_SENSOR_RAW_MIN/MAX 配置命令是否生效。
+ */
+ErrStatus can_protocol_send_gas_threshold_response(uint16_t raw_min, uint16_t raw_max)
+{
+    uint8_t data[8] = {0};
+
+    data[0] = CAN_NODE_MCU;
+    data[1] = CAN_QRY_GAS_THRESHOLD;
+    data[2] = (uint8_t)(raw_min >> 8);
+    data[3] = (uint8_t)(raw_min & 0xFFU);
+    data[4] = (uint8_t)(raw_max >> 8);
+    data[5] = (uint8_t)(raw_max & 0xFFU);
+    data[6] = CAN_RSVD_FILL;
+    data[7] = CAN_RSVD_FILL;
+
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
+}
+
+/*
+ * can_protocol_send_predict_status_response - 异常升温预警功能状态查询响应
+ *   (ID: 0x188, Byte0=CAN_NODE_MCU)
+ *   Byte0      源节点（0x20=MCU）
+ *   Byte1      消息号（回显 CAN_QRY_PREDICT_STATUS）
+ *   Byte2      使能标志（1=开启，0=关闭）
+ *   Byte3      分区0历史累计触发次数（饱和于255）
+ *   Byte4      分区1历史累计触发次数（饱和于255）
+ *   Byte5      分区2历史累计触发次数（饱和于255）
+ *   Byte6      分区3历史累计触发次数（饱和于255）
+ *   Byte7      预留，填 0xCC
+ *
+ * 用途：上位机借助此命令确认预警功能是否真的在起作用（历史触发次数
+ *       是否随时间推进而增长），比单纯查看瞬时告警标志更可靠。
+ *       计数可通过 CAN_CFG_CLEAR_PREDICT_HISTORY 配置命令清零。
+ */
+ErrStatus can_protocol_send_predict_status_response(uint8_t enable, const uint8_t zone_trigger_count[4])
+{
+    uint8_t data[8] = {0};
+
+    data[0] = CAN_NODE_MCU;
+    data[1] = CAN_QRY_PREDICT_STATUS;
+    data[2] = enable;
+    data[3] = zone_trigger_count[0];
+    data[4] = zone_trigger_count[1];
+    data[5] = zone_trigger_count[2];
+    data[6] = zone_trigger_count[3];
+    data[7] = CAN_RSVD_FILL;
+
+    return can_driver_send_std_frame(DTM_CAN4, CAN_ID_QUERY, data, 8U);
+}
+
 ErrStatus can_protocol_send_control_ack(uint8_t msg_id, uint8_t result)
 {
     uint8_t data[8] = {0};

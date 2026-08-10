@@ -11,9 +11,8 @@
 /*
  * 业务逻辑通道到硬件通道的映射表
  *
- * 硬件映射（GD32A7xx）：
- *   - ADC_ECUAL_CH_GAS_SENSOR      → ADC_CH_IN12 (PH8)
- *   - ADC_ECUAL_CH_COOLER_CURRENT  → ADC_CH_IN13 (PH7)
+ * 硬件映射（GD32A7xx，2026-08-09 更新）：
+ *   - ADC_ECUAL_CH_GAS_SENSOR      → ADC_CH_IN9  (PD11)
  *
  * 修改说明：
  *   - 如果硬件接线变更，只需修改此映射表，应用层代码无需改动；
@@ -25,8 +24,7 @@ typedef struct {
 } adc_ecual_mapping_t;
 
 static const adc_ecual_mapping_t s_mapping[] = {
-    {ADC_ECUAL_CH_GAS_SENSOR,     ADC_CH_IN12},  /* 气体传感器 -> PH8/ADC0_IN12 */
-    {ADC_ECUAL_CH_COOLER_CURRENT, ADC_CH_IN13}   /* 制冷片电流 -> PH7/ADC0_IN13 */
+    {ADC_ECUAL_CH_GAS_SENSOR, ADC_CH_IN9}   /* 气体传感器故障检测 -> PD11/ADC0_IN9 */
 };
 
 #define ADC_ECUAL_MAPPING_COUNT (sizeof(s_mapping) / sizeof(s_mapping[0]))

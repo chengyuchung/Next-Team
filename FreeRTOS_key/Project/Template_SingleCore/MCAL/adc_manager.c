@@ -3,6 +3,7 @@
 #include "gd32a7xx_adc.h"
 #include "gd32a7xx_gpio.h"
 #include "gd32a7xx_rcu.h"
+#include "gd32a7xx_cltcfg.h"
 
 #include "FreeRTOS.h"
 #include "task.h"
@@ -33,7 +34,7 @@
 #endif
 
 #ifndef ADC_MANAGER_CHANNEL_COUNT
-#define ADC_MANAGER_CHANNEL_COUNT           2U
+#define ADC_MANAGER_CHANNEL_COUNT           1U
 #endif
 
 #ifndef ADC_MANAGER_SAMPLE_TIME_DEFAULT
@@ -54,15 +55,17 @@ static uint8_t s_calibration_failed = 0U;
 
 /* 硬件通道配置表（ADC_CH_INxx -> GPIO + ADC 硬件资源）
  * 
- * 硬件映射（2026-08-05 解耦版本）：
- *   - ADC_CH_IN12 : PH8 / ADC0_IN12
- *   - ADC_CH_IN13 : PH7 / ADC0_IN13
+ * 硬件映射（2026-08-09 更新）：
+ *   - ADC_CH_IN9  : PD11 / ADC0_IN9（MQ9气体传感器故障检测，模拟量）
+ *
+ * 注意：ADC0_IN9 硬件通道有两个可选驱动引脚（默认PG7 / 备选PD11），
+ * 由 CLTCFG 外设的 cltcfg_adc_drive_pin_select() 切换，
+ * 见 adc_manager_gpio_init_one() 中的特殊处理。
  *
  * 业务含义由 BSW/EcuAL 层定义，MCAL 层不关心具体应用。
  */
 static const adc_channel_cfg_t s_cfg[ADC_MANAGER_CHANNEL_COUNT] = {
-    {ADC_CH_IN12, RCU_GPIOH, GPIOH, GPIO_PIN_8, 12U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 0U},  /* PH8 - ADC0_IN12 */
-    {ADC_CH_IN13, RCU_GPIOH, GPIOH, GPIO_PIN_7, 13U, ADC_MANAGER_SAMPLE_TIME_DEFAULT, 1U}   /* PH7 - ADC0_IN13 */
+    {ADC_CH_IN9,  RCU_GPIOD, GPIOD, GPIO_PIN_11, 9U,  ADC_MANAGER_SAMPLE_TIME_DEFAULT, 0U}  /* PD11 - ADC0_IN9 */
 };
 
 /* ========================================================================== */
@@ -90,6 +93,13 @@ static void adc_manager_gpio_init_one(const adc_channel_cfg_t *cfg)
 
     rcu_periph_clock_enable(cfg->gpio_rcu);
     gpio_mode_set(cfg->gpio_port, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, cfg->gpio_pin);
+
+    /* ADC0_IN9 硬件通道默认驱动引脚是 PG7，本工程实际接线在 PD11，
+     * 必须通过 CLTCFG 显式切换，否则 ADC0_IN9 转换结果对应的仍是 PG7
+     * 引脚的电平，PD11 上的信号读不到。*/
+    if(cfg->adc_channel == 9U) {
+        cltcfg_adc_drive_pin_select(ADC0_CH9_DP_PD11);
+    }
 }
 
 static void adc_manager_apply_common_config(void)
@@ -141,6 +151,10 @@ void adc_manager_init(void)
 
     /* ADC0 外设时钟使能。必须在调用 rcu_adc_clock_config 之前使能。 */
     rcu_periph_clock_enable(RCU_ADC0);
+
+    /* CLTCFG 外设时钟使能：ADC0_IN9 驱动引脚切换（PG7->PD11）依赖 CLTCFG
+     * 寄存器，必须先使能其时钟才能写入生效。 */
+    rcu_periph_clock_enable(RCU_CLTCFG);
 
     /* 配置 ADC 时钟源与预分频。
      * 参考手册建议：f_ADC 推荐 16MHz，最低 1MHz，最高 60MHz（保证精度）。

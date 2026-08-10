@@ -25,9 +25,6 @@ extern "C" {
 /* CAN 接收事件标志（由中断设置） */
 extern volatile uint8_t g_can4_rx_event;
 
-/* 系统状态变化标志（由 system_state 模块置位） */
-extern volatile uint8_t g_system_state_changed_flag;
-
 /*
  * 函数名称 : can_app_init
  * 功能描述 : 初始化 CAN 应用层（包括硬件驱动层）。
@@ -188,6 +185,38 @@ ErrStatus can_app_upload_guard_sleep(void);
  */
 ErrStatus can_app_upload_guard_budget(void);
 
+/*
+ * 函数名称 : can_app_upload_adc_raw
+ * 功能描述 : 上报气体传感器 ADC 原始值，用于现场标定
+ *           fault_manager 固定阈值。
+ * 输入参数 : 无
+ * 输出参数 : 无
+ * 返 回 值 :
+ *   - SUCCESS : 发送成功
+ *   - ERROR   : 发送失败
+ */
+ErrStatus can_app_upload_adc_raw(void);
+
+/*
+ * 函数名称 : can_app_upload_gas_threshold
+ * 功能描述 : 上报气体传感器故障判定区间（下限+上限），用于核实
+ *           CAN_CFG_GAS_SENSOR_RAW_MIN/MAX 配置命令是否生效。
+ * 输入参数 : 无
+ * 输出参数 : 无
+ * 返 回 值 :
+ *   - SUCCESS : 发送成功
+ *   - ERROR   : 发送失败
+ */
+ErrStatus can_app_upload_gas_threshold(void);
+
+/*
+ * 函数名称 : can_app_upload_predict_status
+ * 功能描述 : 上报温度预测功能当前状态（使能标志+4个分区历史累计触发次数），
+ *           用于确认预警功能是否真的起作用。
+ * 返 回 值 : SUCCESS / ERROR
+ */
+ErrStatus can_app_upload_predict_status(void);
+
 /* 兼容旧代码的宏定义 */
 #define can_handle_query               can_app_handle_query
 #define can_upload_env                 can_app_upload_env
@@ -198,6 +227,7 @@ ErrStatus can_app_upload_guard_budget(void);
 #define can_upload_threshold           can_app_upload_threshold
 #define can_upload_guard_sleep         can_app_upload_guard_sleep
 #define can_upload_guard_budget        can_app_upload_guard_budget
+#define can_upload_adc_raw             can_app_upload_adc_raw
 #define can_process_pending_uploads    can_app_process_pending_uploads
 
 /* 直接暴露协议层函数（用于 ACK 响应） */

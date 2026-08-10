@@ -59,6 +59,15 @@ void app_tasks_start(void);
  */
 uint32_t app_tasks_get_guard_current_sleep_ms(void);
 
+/*
+ * app_tasks_get_guard_current_budget_ms
+ *   查询 guard_task 自适应 NORMAL 持续确认时长当前实际生效的值（毫秒）。
+ *   与 g_guard_handling_budget_ms（配置基准值）不同：本值会随巡检结果
+ *   动态增加（见 app_tasks.c 的 guard_adjust_budget()）。
+ *   供 CAN 查询响应（CAN_QRY_GUARD_BUDGET）读取，仅读不写。
+ */
+uint32_t app_tasks_get_guard_current_budget_ms(void);
+
 #ifdef __cplusplus
 }
 #endif

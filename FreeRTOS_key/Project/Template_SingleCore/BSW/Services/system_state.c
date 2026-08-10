@@ -11,18 +11,20 @@ uint16_t g_danger_temp_threshold_tenths = SYSTEM_STATE_DEFAULT_DANGER_TEMP_C;
 uint8_t g_fallback_confirm_count        = SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT;
 
 /*
- * 温度趋势预测配置参数（主动预警功能）
+ * 温度异常升温预警配置参数（简化版）
+ *   DS18B20 采样周期固定（约 1s），直接用相邻两帧温度差判断升温过快，
+ *   不再需要时间戳与 EMA 平滑。
+ *   阈值单位 0.01°C，可检测细微温度变化。
  */
-uint8_t g_temp_prediction_enable     = 1U;   /* 默认开启 */
-uint8_t g_temp_prediction_horizon_s  = 15U;  /* 预测窗口 15 秒 */
-uint16_t g_temp_prediction_min_rate  = 10U;  /* 最小斜率 0.1°C/s */
+uint8_t g_temp_prediction_enable        = 0U;   /* 默认关闭 */
+uint16_t g_temp_rise_danger_threshold   = 300U;  /* 单次升温 >= 0.30°C 视为异常，直接判 DANGER 级别 */
+uint16_t g_temp_rise_high_threshold     = 20U;  /* 单次升温 >= 0.15°C 视为偏快，判 HIGH_TEMP 级别 */
+uint8_t g_temp_rise_confirm_count       = 2U;   /* 连续 2 帧都超过阈值才触发，过滤单点噪声 */
 
 /*
- * 外部状态变化标志
- *   由状态机在发生有效状态切换时置位，通常由主循环或上层任务轮询处理。
- *   它只表示"状态已经变化"，不直接代表故障、告警或安全锁定。
+ * 制冷片轮转配置参数
  */
-extern volatile uint8_t g_system_state_changed_flag;
+uint32_t g_cooler_rotate_interval_ms = SYSTEM_STATE_DEFAULT_COOLER_ROTATE_MS;
 
 /*
  * 模块内部状态
@@ -63,28 +65,42 @@ static uint8_t s_zone_high_temp_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_danger_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
 
 /*
- * 温度趋势预测历史数据（用于计算变化率）
+ * 制冷片轮转状态
+ *   气体告警触发 DANGER 时，4路制冷片同时需要工作，但电池功率不足以全开。
+ *   轮转策略：每次只允许一路处于开启状态，按 DANGER 分区的编号顺序循环，
+ *   每隔 g_cooler_rotate_interval_ms 切换到下一路。
  *
- *   变化率必须基于"两次真实温度采样之间的时间差"计算。异步采集架构下，
- *   温度由独立任务约每秒刷新一次，而状态机可能被高频调用（如 20ms）。
- *   因此这里以温度样本自带的时间戳(temp_sample_time_ms)为基准，并且只在
- *   input->temp_sample_fresh 为 1（确实来了一帧新样本）时才推进历史，
- *   彻底与状态机的调用频率解耦。
+ *   s_cooler_rotate_slot  : 当前轮转槽位（0-3，对应制冷片1-4）
+ *   s_cooler_rotate_last_ms : 上次切换时的时间戳（来自 input->now_ms）
+ */
+static uint8_t  s_cooler_rotate_slot   = 0U;
+static uint32_t s_cooler_rotate_last_ms = 0U;
+
+/*
+ * 温度异常升温预警历史数据（简化版）
  *
- *   s_zone_prev_temp[i]       : 分区 i 上一帧样本温度，单位 0.1°C
- *   s_zone_prev_valid[i]      : 分区 i 上一帧样本是否有效
- *   s_zone_temp_rate[i]       : 分区 i 温度变化率（EMA平滑后），单位 0.01°C/s
- *   s_zone_rate_valid[i]      : 分区 i 变化率是否有效（至少有 2 个历史样本）
- *   s_prev_sample_time_ms     : 上一帧被采纳样本的采集时间戳，用于计算 dt
- *   s_prev_sample_valid       : 是否已有一帧基准样本
+ *   DS18B20 采样周期恒定（约1s），不需要基于时间戳计算变化率，
+ *   只需比较"当前帧"与"上一帧"的温度差即可判断升温是否过快。
+ *   为避免单点噪声（例如某次读数抖动）误触发，要求连续
+ *   g_temp_rise_confirm_count 帧都超过阈值才真正触发预警。
+ *
+ *   s_zone_prev_temp[i]        : 分区 i 上一帧样本温度，单位 0.1°C
+ *   s_zone_prev_valid[i]       : 分区 i 上一帧样本是否有效
+ *   s_zone_rise_danger_count[i]: 分区 i 连续超过 DANGER 升温阈值的帧数
+ *   s_zone_rise_high_count[i]  : 分区 i 连续超过 HIGH_TEMP 升温阈值的帧数
  */
 static int16_t s_zone_prev_temp[4] = {0, 0, 0, 0};
 static uint8_t s_zone_prev_valid[4] = {0U, 0U, 0U, 0U};
-static int16_t s_zone_temp_rate[4] = {0, 0, 0, 0};
-static uint8_t s_zone_rate_valid[4] = {0U, 0U, 0U, 0U};
-static uint32_t s_prev_sample_time_ms = 0U;
-static uint8_t s_prev_sample_valid = 0U;
+static uint8_t s_zone_rise_danger_count[4] = {0U, 0U, 0U, 0U};
+static uint8_t s_zone_rise_high_count[4] = {0U, 0U, 0U, 0U};
 
+/*
+ * s_zone_predict_prev_triggered[i]
+ *   分区 i 上一轮预警是否处于触发状态，用于边缘检测：
+ *   只在"未触发→触发"的跳变时刻才累加 s_status.zone_predict_trigger_count[i]，
+ *   避免持续触发期间重复计数。
+ */
+static uint8_t s_zone_predict_prev_triggered[4] = {0U, 0U, 0U, 0U};
 
 
 
@@ -131,10 +147,10 @@ static system_state_t system_state_reduce_zone_states(void)
 /*
  * system_state_zone_apply_outputs
  *   根据分区状态设置该分区的加热片/制冷片使能。
- *   与原整体状态机的对应关系一致：
  *     LOW_TEMP  : 加热片开，制冷片关；
+ *     HIGH_TEMP : 加热片关，制冷片关（仅告警，不主动制冷）；
  *     DANGER    : 加热片关，制冷片开；
- *     NORMAL/HIGH_TEMP : 加热片、制冷片均关。
+ *     NORMAL    : 加热片、制冷片均关。
  */
 static void system_state_zone_apply_outputs(uint8_t zone_idx, system_state_t state)
 {
@@ -147,8 +163,8 @@ static void system_state_zone_apply_outputs(uint8_t zone_idx, system_state_t sta
         s_status.heater_enable[zone_idx] = 0U;
         s_status.cooler_enable[zone_idx] = 1U;
         break;
-    case SYSTEM_STATE_NORMAL:
     case SYSTEM_STATE_HIGH_TEMP:
+    case SYSTEM_STATE_NORMAL:
     default:
         s_status.heater_enable[zone_idx] = 0U;
         s_status.cooler_enable[zone_idx] = 0U;
@@ -253,7 +269,6 @@ static void system_state_sync_common_outputs(uint32_t now_ms)
     for(i = 0U; i < 4U; i++) {
         s_status.zone_predictive[i] = 0U;
     }
-    g_system_state_changed_flag = 0U;
 }
 
 
@@ -342,163 +357,114 @@ static uint8_t system_state_zone_has_danger(const system_state_input_t *input, u
 }
 
 /*
- * system_state_update_temp_rates
- *   在收到一帧新温度样本时，更新全部 4 个分区的温度变化率（带 EMA 平滑）。
+ * system_state_update_temp_delta
+ *   在收到一帧新温度样本时，更新全部 4 个分区的温度变化量（简化版）。
  *
- *   与旧实现的关键区别：本函数由"新样本"驱动，而不是由状态机调用频率驱动。
- *   dt 取自两帧样本自带的采集时间戳之差（input->temp_sample_time_ms），
- *   因此即使 app_task 以 20ms 高频调用状态机，只要温度还是同一帧缓存，
- *   就不会重复推进历史，斜率始终反映真实的每秒温度变化。
- *
- * 说明
- *   - 变化率单位：0.01°C/s（例如 rate=100 表示 1.0°C/s）
- *   - EMA 平滑系数 α=0.3，快速响应突变但抑制噪声
- *   - 两帧样本间隔 < 100ms 或 > 5000ms 视为异常（例如 guard 长睡眠后），
- *     只把当前帧作为新基准重置，不据此算斜率，避免产生虚假的巨大斜率
+ *   DS18B20 采样周期固定（约 1s），无需时间戳，直接计算
+ *   ΔT = T_current - T_prev（单位 0.1°C）。
+ *   同时更新连续超阈计数器，用于异常升温预警。
  */
-static void system_state_update_temp_rates(const system_state_input_t *input)
+static void system_state_update_temp_delta(const system_state_input_t *input)
 {
-    int32_t dt_ms;
     uint8_t zone_idx;
-    uint8_t dt_usable;
+    int16_t current_temp;
+    int16_t delta;
 
     if(input == NULL) {
         return;
     }
 
-    /* 首帧样本：只记录基准，不算斜率 */
-    if(s_prev_sample_valid == 0U) {
-        for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
-            if(input->zone_temp_valid[zone_idx] != 0U) {
-                s_zone_prev_temp[zone_idx] = input->zone_temperature_tenths[zone_idx];
-                s_zone_prev_valid[zone_idx] = 1U;
-            }
-        }
-        s_prev_sample_time_ms = input->temp_sample_time_ms;
-        s_prev_sample_valid = 1U;
-        return;
-    }
-
-    dt_ms = (int32_t)(input->temp_sample_time_ms - s_prev_sample_time_ms);
-    dt_usable = (uint8_t)((dt_ms >= 100) && (dt_ms <= 5000));
-
     for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
-        int32_t dtemp;
-        int32_t rate_raw;
-        int32_t rate_filtered;
-        int16_t current_temp;
-
         if(input->zone_temp_valid[zone_idx] == 0U) {
-            /* 该分区本帧无效：不推进它的历史，下次有效时重新建立基准 */
+            /* 本帧无效：清除历史基准和计数器，等下次有效帧重建 */
             s_zone_prev_valid[zone_idx] = 0U;
-            s_zone_rate_valid[zone_idx] = 0U;
+            s_zone_rise_danger_count[zone_idx] = 0U;
+            s_zone_rise_high_count[zone_idx] = 0U;
             continue;
         }
 
         current_temp = input->zone_temperature_tenths[zone_idx];
 
-        if((dt_usable == 0U) || (s_zone_prev_valid[zone_idx] == 0U)) {
-            /* 时间间隔异常或该分区缺少上一帧基准：仅重置基准 */
+        if(s_zone_prev_valid[zone_idx] == 0U) {
+            /* 首帧有效样本：只建立基准，不计算差值 */
             s_zone_prev_temp[zone_idx] = current_temp;
             s_zone_prev_valid[zone_idx] = 1U;
-            s_zone_rate_valid[zone_idx] = 0U;
+            s_zone_rise_danger_count[zone_idx] = 0U;
+            s_zone_rise_high_count[zone_idx] = 0U;
             continue;
         }
 
-        dtemp = (int32_t)current_temp - (int32_t)s_zone_prev_temp[zone_idx];
-        /* 单位换算：dtemp 单位 0.1°C，dt_ms 单位 ms，目标单位 0.01°C/s
-         * rate = (dtemp [0.1°C]) / (dt_ms [ms] / 1000) * 100 [转成 0.01°C/s]
-         *      = (dtemp * 100 * 1000) / dt_ms = (dtemp * 10000) / dt_ms
-         * 之前误写成 100000，导致计算结果放大 10 倍，0.01°C/s 的噪声就触发预测告警。 */
-        rate_raw = (dtemp * 10000) / dt_ms;
+        delta = (int16_t)(current_temp - s_zone_prev_temp[zone_idx]);
 
-        if(s_zone_rate_valid[zone_idx] == 0U) {
-            s_zone_temp_rate[zone_idx] = (int16_t)rate_raw;
-            s_zone_rate_valid[zone_idx] = 1U;
+        /* 更新异常升温连续计数器
+         * delta 单位是 0.1°C，阈值单位是 0.01°C，需要将 delta * 10 后比较 */
+        if((delta * 10) >= (int16_t)g_temp_rise_danger_threshold) {
+            if(s_zone_rise_danger_count[zone_idx] < 0xFFU) {
+                s_zone_rise_danger_count[zone_idx]++;
+            }
         } else {
-            rate_filtered = (rate_raw * 30 + (int32_t)s_zone_temp_rate[zone_idx] * 70) / 100;
-            s_zone_temp_rate[zone_idx] = (int16_t)rate_filtered;
+            s_zone_rise_danger_count[zone_idx] = 0U;
+        }
+
+        if((delta * 10) >= (int16_t)g_temp_rise_high_threshold) {
+            if(s_zone_rise_high_count[zone_idx] < 0xFFU) {
+                s_zone_rise_high_count[zone_idx]++;
+            }
+        } else {
+            s_zone_rise_high_count[zone_idx] = 0U;
         }
 
         s_zone_prev_temp[zone_idx] = current_temp;
-        s_zone_prev_valid[zone_idx] = 1U;
     }
-
-    s_prev_sample_time_ms = input->temp_sample_time_ms;
 }
 
 /*
  * system_state_zone_predict_danger
- *   预测指定分区在未来时间窗口内是否会突破危险阈值。
+ *   判断指定分区是否满足"异常急速升温→DANGER级别"预警条件。
+ *
+ * 规则：预警功能开启，且连续 g_temp_rise_confirm_count 帧升温量
+ *       均超过 g_temp_rise_danger_threshold（单位 0.01°C，默认 30 = 0.30°C/帧）。
  *
  * 返回值
- *   1 = 预测将突破危险阈值（需提前升级到 DANGER）
- *   0 = 不会突破或预测功能未启用
+ *   1 = 触发预警，需提前升级到 DANGER
+ *   0 = 未触发
  */
 static uint8_t system_state_zone_predict_danger(const system_state_input_t *input, uint8_t zone_idx)
 {
-    int32_t predicted_temp;
-    int32_t rate;
-    int32_t horizon_ms;
-
     if((g_temp_prediction_enable == 0U) || (input == NULL) || (zone_idx >= 4U)) {
         return 0U;
     }
 
-    if((input->zone_temp_valid[zone_idx] == 0U) || (s_zone_rate_valid[zone_idx] == 0U)) {
+    if(input->zone_temp_valid[zone_idx] == 0U) {
         return 0U;
     }
 
-    rate = (int32_t)s_zone_temp_rate[zone_idx];
-    if(rate < (int32_t)g_temp_prediction_min_rate) {
-        return 0U;
-    }
-
-    horizon_ms = (int32_t)g_temp_prediction_horizon_s * 1000;
-    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 10000;
-
-    if(predicted_temp >= (int32_t)g_danger_temp_threshold_tenths) {
-        return 1U;
-    }
-
-    return 0U;
+    return (uint8_t)(s_zone_rise_danger_count[zone_idx] >= g_temp_rise_confirm_count);
 }
 
 /*
  * system_state_zone_predict_high_temp
- *   预测指定分区在未来时间窗口内是否会突破高温阈值。
+ *   判断指定分区是否满足"升温偏快→HIGH_TEMP级别"预警条件。
+ *
+ * 规则：预警功能开启，且连续 g_temp_rise_confirm_count 帧升温量
+ *       均超过 g_temp_rise_high_threshold（单位 0.01°C，默认 15 = 0.15°C/帧）。
  *
  * 返回值
- *   1 = 预测将突破高温阈值（需提前升级到 HIGH_TEMP）
- *   0 = 不会突破或预测功能未启用
+ *   1 = 触发预警，需提前升级到 HIGH_TEMP
+ *   0 = 未触发
  */
 static uint8_t system_state_zone_predict_high_temp(const system_state_input_t *input, uint8_t zone_idx)
 {
-    int32_t predicted_temp;
-    int32_t rate;
-    int32_t horizon_ms;
-
     if((g_temp_prediction_enable == 0U) || (input == NULL) || (zone_idx >= 4U)) {
         return 0U;
     }
 
-    if((input->zone_temp_valid[zone_idx] == 0U) || (s_zone_rate_valid[zone_idx] == 0U)) {
+    if(input->zone_temp_valid[zone_idx] == 0U) {
         return 0U;
     }
 
-    rate = (int32_t)s_zone_temp_rate[zone_idx];
-    if(rate < (int32_t)g_temp_prediction_min_rate) {
-        return 0U;
-    }
+    return (uint8_t)(s_zone_rise_high_count[zone_idx] >= g_temp_rise_confirm_count);
 
-    horizon_ms = (int32_t)g_temp_prediction_horizon_s * 1000;
-    predicted_temp = (int32_t)input->zone_temperature_tenths[zone_idx] + (rate * horizon_ms) / 10000;
-
-    if(predicted_temp >= (int32_t)g_high_temp_threshold_tenths) {
-        return 1U;
-    }
-
-    return 0U;
 }
 
 /*
@@ -663,6 +629,82 @@ static void system_state_zone_task(uint8_t zone_idx, const system_state_input_t 
 }
 
 /*
+ * system_state_cooler_rotate_apply
+ *   制冷片轮转后处理（仅在 gas_alarm 时生效）。
+ *
+ *   逻辑：
+ *     1) 如果没有 gas_alarm，或者轮转间隔配置为 0，直接返回（不干预正常输出）。
+ *     2) 统计当前 cooler_enable[] 中有多少路需要开启（处于 DANGER 的分区）。
+ *     3) 如果需要开的路数 <= 1，不需要轮转，直接返回。
+ *     4) 按时间戳判断是否到了切换时刻，若到了则把 s_cooler_rotate_slot 推进到
+ *        下一个"应该开"的分区（跳过不需要开的分区）。
+ *     5) 最终只保留 s_cooler_rotate_slot 对应那一路，其余全部关闭。
+ */
+static void system_state_cooler_rotate_apply(const system_state_input_t *input)
+{
+    uint8_t i;
+    uint8_t danger_mask = 0U;   /* 哪些分区的制冷片当前应该开 */
+    uint8_t danger_count = 0U;
+    uint32_t elapsed_ms;
+    uint8_t next_slot;
+
+    if((input == NULL) || (input->gas_alarm == 0U)) {
+        return;
+    }
+
+    if(g_cooler_rotate_interval_ms == 0U) {
+        return;  /* 轮转禁用，恢复全开 */
+    }
+
+    /* 收集当前需要开的分区掩码 */
+    for(i = 0U; i < 4U; i++) {
+        if(s_status.cooler_enable[i] != 0U) {
+            danger_mask |= (uint8_t)(1U << i);
+            danger_count++;
+        }
+    }
+
+    if(danger_count <= 1U) {
+        return;  /* 只有 0 或 1 路需要开，无需轮转 */
+    }
+
+    /* 判断是否到了切换时刻（处理 32 位溢出） */
+    elapsed_ms = input->now_ms - s_cooler_rotate_last_ms;
+    if(elapsed_ms >= g_cooler_rotate_interval_ms) {
+        /* 从当前槽位往后找下一个需要开的分区 */
+        next_slot = s_cooler_rotate_slot;
+        for(i = 0U; i < 4U; i++) {
+            next_slot = (uint8_t)((next_slot + 1U) % 4U);
+            if((danger_mask & (uint8_t)(1U << next_slot)) != 0U) {
+                break;
+            }
+        }
+        s_cooler_rotate_slot    = next_slot;
+        s_cooler_rotate_last_ms = input->now_ms;
+    } else {
+        /* 未到切换时刻：确保当前槽位在需要开的分区里，
+         * 如果不在（例如刚进入 gas_alarm，槽位对应的分区恰好不在 DANGER），
+         * 则找第一个需要开的分区作为初始槽位。 */
+        if((danger_mask & (uint8_t)(1U << s_cooler_rotate_slot)) == 0U) {
+            for(i = 0U; i < 4U; i++) {
+                if((danger_mask & (uint8_t)(1U << i)) != 0U) {
+                    s_cooler_rotate_slot    = i;
+                    s_cooler_rotate_last_ms = input->now_ms;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* 只保留轮转槽位对应那一路，其余关闭 */
+    for(i = 0U; i < 4U; i++) {
+        if(i != s_cooler_rotate_slot) {
+            s_status.cooler_enable[i] = 0U;
+        }
+    }
+}
+
+/*
  * system_state_init
  *   完成状态机的首次初始化。
  *   初始化后系统会处于 NORMAL 状态，并准备好默认配置和输出快照。
@@ -681,15 +723,18 @@ void system_state_init(void)
         system_state_zone_clear_fall_counters(i);
     }
 
-    /* 初始化温度趋势预测历史数据 */
+    /* 初始化温度异常升温预警历史数据 */
     for(i = 0U; i < 4U; i++) {
         s_zone_prev_temp[i] = 0;
         s_zone_prev_valid[i] = 0U;
-        s_zone_temp_rate[i] = 0;
-        s_zone_rate_valid[i] = 0U;
+        s_zone_rise_danger_count[i] = 0U;
+        s_zone_rise_high_count[i] = 0U;
+        s_zone_predict_prev_triggered[i] = 0U;
     }
-    s_prev_sample_time_ms = 0U;
-    s_prev_sample_valid = 0U;
+
+    /* 复位制冷片轮转状态 */
+    s_cooler_rotate_slot    = 0U;
+    s_cooler_rotate_last_ms = 0U;
 
     s_last_input_valid = 0U;
     s_initialized = 1U;
@@ -724,19 +769,36 @@ void system_state_reset(void)
         system_state_zone_clear_fall_counters(i);
     }
 
-    /* 清空温度趋势预测历史数据 */
+    /* 清空温度异常升温预警历史数据 */
     for(i = 0U; i < 4U; i++) {
         s_zone_prev_temp[i] = 0;
         s_zone_prev_valid[i] = 0U;
-        s_zone_temp_rate[i] = 0;
-        s_zone_rate_valid[i] = 0U;
+        s_zone_rise_danger_count[i] = 0U;
+        s_zone_rise_high_count[i] = 0U;
+        s_zone_predict_prev_triggered[i] = 0U;
     }
-    s_prev_sample_time_ms = 0U;
-    s_prev_sample_valid = 0U;
+
+    /* 复位制冷片轮转状态 */
+    s_cooler_rotate_slot    = 0U;
+    s_cooler_rotate_last_ms = 0U;
 
     /* 标记系统已完成初始化 */
     s_last_input_valid = 0U;
     s_initialized = 1U;
+}
+
+/*
+ * system_state_clear_predict_history
+ *   仅清除4个分区的升温预警历史累计触发次数，不影响状态机当前
+ *   运行状态（不复位 zone_state / 回落计数器 / 制冷片轮转等）。
+ *   用于配合 CAN_CFG_CLEAR_PREDICT_HISTORY 配置命令。
+ */
+void system_state_clear_predict_history(void)
+{
+    uint8_t i;
+    for(i = 0U; i < 4U; i++) {
+        s_status.zone_predict_trigger_count[i] = 0U;
+    }
 }
 
 
@@ -766,12 +828,12 @@ void system_state_task(const system_state_input_t *input)
     old_global_state = s_status.state;
 
     /*
-     * 温度变化率更新：仅在收到一帧新温度样本时推进历史。
+     * 升温异常检测：仅在收到一帧新温度样本时推进历史。
      * 异步采集下 app_task 以 20ms 高频调用本状态机，但温度约 1s 才刷新一次，
-     * 用 temp_sample_fresh 过滤掉重复缓存，保证斜率基于真实采样间隔。
+     * 用 temp_sample_fresh 过滤掉重复缓存，保证温度差基于真实采样间隔（DS18B20 固定约1s）。
      */
     if(input->temp_sample_fresh != 0U) {
-        system_state_update_temp_rates(input);
+        system_state_update_temp_delta(input);
     }
 
     /*
@@ -796,9 +858,18 @@ void system_state_task(const system_state_input_t *input)
         if((predict_danger != 0U) || (predict_high != 0U)) {
             s_status.zone_predictive[zone_idx] = 1U;
             s_status.predictive_alarm = 1U;
-        }
 
-        s_status.zone_temp_rate[zone_idx] = s_zone_temp_rate[zone_idx];
+            /* 边缘检测：仅在"未触发→触发"的跳变时刻累加历史计数，
+             * 避免持续触发（比如手一直捂着）期间每轮都+1。 */
+            if(s_zone_predict_prev_triggered[zone_idx] == 0U) {
+                if(s_status.zone_predict_trigger_count[zone_idx] < 0xFFU) {
+                    s_status.zone_predict_trigger_count[zone_idx]++;
+                }
+            }
+            s_zone_predict_prev_triggered[zone_idx] = 1U;
+        } else {
+            s_zone_predict_prev_triggered[zone_idx] = 0U;
+        }
 
         system_state_zone_task(zone_idx, input, has_danger_i, has_high_i, has_low_i);
     }
@@ -810,13 +881,13 @@ void system_state_task(const system_state_input_t *input)
     new_global_state = system_state_reduce_zone_states();
     s_status.state = new_global_state;
     s_status.state_changed = (uint8_t)(new_global_state != old_global_state);
-    if((s_status.state_changed != 0U) &&
-       ((new_global_state == SYSTEM_STATE_NORMAL) ||
-        (new_global_state == SYSTEM_STATE_LOW_TEMP) ||
-        (new_global_state == SYSTEM_STATE_HIGH_TEMP) ||
-        (new_global_state == SYSTEM_STATE_DANGER))) {
-        g_system_state_changed_flag = 1U;
-    }
+
+    /*
+     * 制冷片轮转后处理：仅在 gas_alarm 时生效。
+     * 4个分区状态机已经把 cooler_enable[] 按各自状态设置完毕，
+     * 这里再做一次过滤，确保气体告警时最多只有一路制冷片同时工作。
+     */
+    system_state_cooler_rotate_apply(input);
 
     system_state_apply_global_outputs(new_global_state);
     system_state_set_next_sample_period();

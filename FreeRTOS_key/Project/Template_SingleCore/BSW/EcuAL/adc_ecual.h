@@ -18,9 +18,9 @@ extern "C" {
  *   3) 提供业务逻辑友好的 ADC 读取接口。
  *
  * 架构分层 :
- *   App Layer      → 使用业务逻辑名称 (GAS_SENSOR, COOLER_CURRENT)
+ *   App Layer      → 使用业务逻辑名称 (GAS_SENSOR)
  *   BSW/EcuAL      → 映射层 (本模块)
- *   MCAL Layer     → 硬件通道号 (ADC_CH_IN12, ADC_CH_IN13)
+ *   MCAL Layer     → 硬件通道号 (ADC_CH_IN9)
  * ============================================================================
  */
 
@@ -32,8 +32,7 @@ extern "C" {
  *   - 硬件通道映射由本模块的实现文件负责。
  */
 typedef enum {
-    ADC_ECUAL_CH_GAS_SENSOR = 0U,   /* 气体传感器模拟量输入 */
-    ADC_ECUAL_CH_COOLER_CURRENT,    /* 制冷片电流监测 */
+    ADC_ECUAL_CH_GAS_SENSOR = 0U,   /* MQ9气体传感器故障检测（模拟量，PD11/ADC0_IN9） */
     ADC_ECUAL_CH_MAX
 } adc_ecual_channel_t;
 

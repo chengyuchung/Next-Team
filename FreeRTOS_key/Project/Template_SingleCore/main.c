@@ -127,6 +127,7 @@ void board_init(void)
     }
 
     system_state_init();
+    fault_manager_init();
 
 #if WATCHDOG_ENABLE
     watchdog_init(WATCHDOG_DEFAULT_TIMEOUT_MS);
