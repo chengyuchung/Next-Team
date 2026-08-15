@@ -22,9 +22,9 @@ uint16_t g_temp_rise_high_threshold     = 20U;  /* 单次升温 >= 0.15°C 视�
 uint8_t g_temp_rise_confirm_count       = 2U;   /* 连续 2 帧都超过阈值才触发，过滤单点噪声 */
 
 /*
- * 制冷片轮转配置参数
+ * 制冷片功能开关
  */
-uint32_t g_cooler_rotate_interval_ms = SYSTEM_STATE_DEFAULT_COOLER_ROTATE_MS;
+uint8_t g_cooler_enable = 0U;  /* 默认开启制冷片功能 */
 
 /*
  * 模块内部状态
@@ -63,18 +63,6 @@ static uint8_t s_initialized = 0U;
 static uint8_t s_zone_low_temp_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_high_temp_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
 static uint8_t s_zone_danger_fall_confirm_count[4] = {0U, 0U, 0U, 0U};
-
-/*
- * 制冷片轮转状态
- *   气体告警触发 DANGER 时，4路制冷片同时需要工作，但电池功率不足以全开。
- *   轮转策略：每次只允许一路处于开启状态，按 DANGER 分区的编号顺序循环，
- *   每隔 g_cooler_rotate_interval_ms 切换到下一路。
- *
- *   s_cooler_rotate_slot  : 当前轮转槽位（0-3，对应制冷片1-4）
- *   s_cooler_rotate_last_ms : 上次切换时的时间戳（来自 input->now_ms）
- */
-static uint8_t  s_cooler_rotate_slot   = 0U;
-static uint32_t s_cooler_rotate_last_ms = 0U;
 
 /*
  * 温度异常升温预警历史数据（简化版）
@@ -148,7 +136,7 @@ static system_state_t system_state_reduce_zone_states(void)
  * system_state_zone_apply_outputs
  *   根据分区状态设置该分区的加热片/制冷片使能。
  *     LOW_TEMP  : 加热片开，制冷片关；
- *     HIGH_TEMP : 加热片关，制冷片关（仅告警，不主动制冷）；
+ *     HIGH_TEMP : 加热片关，制冷片开（高温预警时启动制冷）；
  *     DANGER    : 加热片关，制冷片开；
  *     NORMAL    : 加热片、制冷片均关。
  */
@@ -159,11 +147,14 @@ static void system_state_zone_apply_outputs(uint8_t zone_idx, system_state_t sta
         s_status.heater_enable[zone_idx] = 1U;
         s_status.cooler_enable[zone_idx] = 0U;
         break;
+    case SYSTEM_STATE_HIGH_TEMP:
+        s_status.heater_enable[zone_idx] = 0U;
+        s_status.cooler_enable[zone_idx] = (g_cooler_enable != 0U) ? 1U : 0U;
+        break;
     case SYSTEM_STATE_DANGER:
         s_status.heater_enable[zone_idx] = 0U;
-        s_status.cooler_enable[zone_idx] = 1U;
+        s_status.cooler_enable[zone_idx] = (g_cooler_enable != 0U) ? 1U : 0U;
         break;
-    case SYSTEM_STATE_HIGH_TEMP:
     case SYSTEM_STATE_NORMAL:
     default:
         s_status.heater_enable[zone_idx] = 0U;
@@ -191,9 +182,9 @@ static void system_state_apply_global_outputs(system_state_t state)
         break;
     case SYSTEM_STATE_HIGH_TEMP:
         s_status.fan_enable = 1U;
-        s_status.fan_duty_percent = 80U;
+        s_status.fan_duty_percent = 100U;
         s_status.pump_enable = 1U;
-        s_status.pump_duty_percent = 80U;
+        s_status.pump_duty_percent = 100U;
         s_status.gate_enable = 1U;
         s_status.buzzer_enable = 0U;
         s_status.ignition_allowed = 1U;
@@ -307,9 +298,7 @@ static uint8_t system_state_zone_has_low_temp(const system_state_input_t *input,
 /*
  * system_state_zone_has_high_temp
  *   判断指定分区是否满足"高温预警"条件。
- *   触发来源包括：
- *     1) 该分区温度有效，且处于高温预警阈值区间（[27.0°C, 33.0°C)）；
- *     2) 压力异常（全局传感器输入，强制4个分区均至少进入HIGH_TEMP）。
+ *   条件：该分区温度有效，且处于高温预警阈值区间（[27.0°C, 33.0°C)）。
  */
 static uint8_t system_state_zone_has_high_temp(const system_state_input_t *input, uint8_t zone_idx)
 {
@@ -317,10 +306,6 @@ static uint8_t system_state_zone_has_high_temp(const system_state_input_t *input
 
     if(input == NULL) {
         return 0U;
-    }
-
-    if(input->pressure_alarm != 0U) {
-        return 1U;
     }
 
     if(input->zone_temp_valid[zone_idx] == 0U) {
@@ -630,75 +615,59 @@ static void system_state_zone_task(uint8_t zone_idx, const system_state_input_t 
 
 /*
  * system_state_cooler_rotate_apply
- *   制冷片轮转后处理（仅在 gas_alarm 时生效）。
+ *   制冷片智能选择后处理。
  *
  *   逻辑：
- *     1) 如果没有 gas_alarm，或者轮转间隔配置为 0，直接返回（不干预正常输出）。
- *     2) 统计当前 cooler_enable[] 中有多少路需要开启（处于 DANGER 的分区）。
- *     3) 如果需要开的路数 <= 1，不需要轮转，直接返回。
- *     4) 按时间戳判断是否到了切换时刻，若到了则把 s_cooler_rotate_slot 推进到
- *        下一个"应该开"的分区（跳过不需要开的分区）。
- *     5) 最终只保留 s_cooler_rotate_slot 对应那一路，其余全部关闭。
+ *     1) 统计当前 cooler_enable[] 中有多少路需要开启（处于 HIGH_TEMP 或 DANGER 的分区）。
+ *     2) 如果需要开的路数 <= 1，不需要选择，直接返回。
+ *     3) 如果有多路需要开启，只保留温度最高的那一路，其余全部关闭。
+ *     4) 如果多个分区温度相同，优先选择分区索引较小的（zone 0 > zone 1 > zone 2 > zone 3）。
+ *
+ *   设计目的：
+ *     避免多个制冷片同时工作导致功耗过大或电源不足，每次只开启一个制冷片。
+ *     优先冷却温度最高的分区，实现智能热管理。
  */
 static void system_state_cooler_rotate_apply(const system_state_input_t *input)
 {
     uint8_t i;
-    uint8_t danger_mask = 0U;   /* 哪些分区的制冷片当前应该开 */
-    uint8_t danger_count = 0U;
-    uint32_t elapsed_ms;
-    uint8_t next_slot;
+    uint8_t cooler_mask = 0U;   /* 哪些分区的制冷片当前应该开 */
+    uint8_t cooler_count = 0U;
+    uint8_t hottest_zone = 0U;  /* 温度最高的分区索引 */
+    int16_t max_temp = -32768;  /* 当前最高温度（0.1°C） */
 
-    if((input == NULL) || (input->gas_alarm == 0U)) {
+    if(input == NULL) {
         return;
-    }
-
-    if(g_cooler_rotate_interval_ms == 0U) {
-        return;  /* 轮转禁用，恢复全开 */
     }
 
     /* 收集当前需要开的分区掩码 */
     for(i = 0U; i < 4U; i++) {
         if(s_status.cooler_enable[i] != 0U) {
-            danger_mask |= (uint8_t)(1U << i);
-            danger_count++;
+            cooler_mask |= (uint8_t)(1U << i);
+            cooler_count++;
         }
     }
 
-    if(danger_count <= 1U) {
-        return;  /* 只有 0 或 1 路需要开，无需轮转 */
+    if(cooler_count <= 1U) {
+        return;  /* 只有 0 或 1 路需要开，无需选择 */
     }
 
-    /* 判断是否到了切换时刻（处理 32 位溢出） */
-    elapsed_ms = input->now_ms - s_cooler_rotate_last_ms;
-    if(elapsed_ms >= g_cooler_rotate_interval_ms) {
-        /* 从当前槽位往后找下一个需要开的分区 */
-        next_slot = s_cooler_rotate_slot;
-        for(i = 0U; i < 4U; i++) {
-            next_slot = (uint8_t)((next_slot + 1U) % 4U);
-            if((danger_mask & (uint8_t)(1U << next_slot)) != 0U) {
-                break;
-            }
-        }
-        s_cooler_rotate_slot    = next_slot;
-        s_cooler_rotate_last_ms = input->now_ms;
-    } else {
-        /* 未到切换时刻：确保当前槽位在需要开的分区里，
-         * 如果不在（例如刚进入 gas_alarm，槽位对应的分区恰好不在 DANGER），
-         * 则找第一个需要开的分区作为初始槽位。 */
-        if((danger_mask & (uint8_t)(1U << s_cooler_rotate_slot)) == 0U) {
-            for(i = 0U; i < 4U; i++) {
-                if((danger_mask & (uint8_t)(1U << i)) != 0U) {
-                    s_cooler_rotate_slot    = i;
-                    s_cooler_rotate_last_ms = input->now_ms;
-                    break;
+    /* 在需要开启制冷片的分区中，找出温度最高的那一路 */
+    for(i = 0U; i < 4U; i++) {
+        if((cooler_mask & (uint8_t)(1U << i)) != 0U) {
+            /* 该分区需要制冷 */
+            if(input->zone_temp_valid[i] != 0U) {
+                /* 温度有效，比较温度 */
+                if(input->zone_temperature_tenths[i] > max_temp) {
+                    max_temp = input->zone_temperature_tenths[i];
+                    hottest_zone = i;
                 }
             }
         }
     }
 
-    /* 只保留轮转槽位对应那一路，其余关闭 */
+    /* 只保留温度最高的那一路，其余关闭 */
     for(i = 0U; i < 4U; i++) {
-        if(i != s_cooler_rotate_slot) {
+        if(i != hottest_zone) {
             s_status.cooler_enable[i] = 0U;
         }
     }
@@ -731,10 +700,6 @@ void system_state_init(void)
         s_zone_rise_high_count[i] = 0U;
         s_zone_predict_prev_triggered[i] = 0U;
     }
-
-    /* 复位制冷片轮转状态 */
-    s_cooler_rotate_slot    = 0U;
-    s_cooler_rotate_last_ms = 0U;
 
     s_last_input_valid = 0U;
     s_initialized = 1U;
@@ -778,10 +743,6 @@ void system_state_reset(void)
         s_zone_predict_prev_triggered[i] = 0U;
     }
 
-    /* 复位制冷片轮转状态 */
-    s_cooler_rotate_slot    = 0U;
-    s_cooler_rotate_last_ms = 0U;
-
     /* 标记系统已完成初始化 */
     s_last_input_valid = 0U;
     s_initialized = 1U;
@@ -799,6 +760,64 @@ void system_state_clear_predict_history(void)
     for(i = 0U; i < 4U; i++) {
         s_status.zone_predict_trigger_count[i] = 0U;
     }
+}
+
+/*
+ * system_state_force_reevaluate
+ *   强制状态机根据上一次输入立即重新评估所有分区的状态。
+ *   用于退出手动模式时，确保状态机状态与当前实际温度同步，
+ *   避免因回落确认计数器未满而导致状态"卡住"在高温/危险状态。
+ *
+ * 实现逻辑：
+ *   1) 清空所有分区的回落确认计数器
+ *   2) 对每个分区，根据最后一次输入的温度/传感器状态，直接判断应该处于哪个状态
+ *   3) 立即切换到目标状态，不需要等待回落确认
+ *   4) 刷新执行器输出
+ */
+void system_state_force_reevaluate(void)
+{
+    uint8_t zone_idx;
+    const system_state_input_t *input = &s_last_input;
+
+    if(s_last_input_valid == 0U) {
+        return;  /* 如果还没有有效输入，不做任何操作 */
+    }
+
+    /* 清空所有回落确认计数器 */
+    for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
+        system_state_zone_clear_fall_counters(zone_idx);
+    }
+
+    /* 对每个分区重新评估状态 */
+    for(zone_idx = 0U; zone_idx < 4U; zone_idx++) {
+        uint8_t has_danger = system_state_zone_has_danger(input, zone_idx);
+        uint8_t has_high = (uint8_t)(!has_danger && system_state_zone_has_high_temp(input, zone_idx));
+        uint8_t has_low = (uint8_t)(!has_danger && !has_high &&
+                                     system_state_zone_has_low_temp(input, zone_idx));
+
+        /* 根据当前温度状态，直接切换到对应状态 */
+        if(has_danger != 0U) {
+            s_status.zone_state[zone_idx] = SYSTEM_STATE_DANGER;
+        } else if(has_high != 0U) {
+            s_status.zone_state[zone_idx] = SYSTEM_STATE_HIGH_TEMP;
+        } else if(has_low != 0U) {
+            s_status.zone_state[zone_idx] = SYSTEM_STATE_LOW_TEMP;
+        } else {
+            s_status.zone_state[zone_idx] = SYSTEM_STATE_NORMAL;
+        }
+
+        /* 刷新该分区的执行器输出 */
+        system_state_zone_apply_outputs(zone_idx, s_status.zone_state[zone_idx]);
+    }
+
+    /* 更新全局状态 */
+    s_status.state = system_state_reduce_zone_states();
+
+    /* 刷新全局执行器输出 */
+    system_state_apply_global_outputs(s_status.state);
+
+    /* 如果有气体告警，重新应用制冷片轮转逻辑 */
+    system_state_cooler_rotate_apply(input);
 }
 
 
@@ -890,6 +909,15 @@ void system_state_task(const system_state_input_t *input)
     system_state_cooler_rotate_apply(input);
 
     system_state_apply_global_outputs(new_global_state);
+    
+    /*
+     * 压力告警独立处理：不影响温度状态机，只触发蜂鸣器。
+     * 如果压力异常，强制开启蜂鸣器告警（即使当前状态不是 DANGER）。
+     */
+    if(input->pressure_alarm != 0U) {
+        s_status.buzzer_enable = 1U;
+    }
+    
     system_state_set_next_sample_period();
 }
 

@@ -168,7 +168,7 @@ uint32_t g_guard_handling_budget_ms   = 30U * 1000U;  /* 巡检异常处理后�
 #define GUARD_ADAPTIVE_SLEEP_MIN_MS   (  5U * 1000U )
 #define GUARD_ADAPTIVE_SHRINK_PCT     ( 90U )   /* 缩短 10%：乘以 90% */
 #define GUARD_ADAPTIVE_GROW_PCT       ( 120U )  /* 增加 20%：乘以 120% */
-static uint32_t s_guard_current_sleep_interval_ms = 15U * 1000U;
+static uint32_t s_guard_current_sleep_interval_ms = 5U * 1000U;
 
 /* 自适应 NORMAL 持续确认时长（handling budget）：
  *   每次全新进入 guard 模式时，从 g_guard_handling_budget_ms 基准值重新开始；
@@ -810,9 +810,22 @@ static uint8_t can_handle_control(uint8_t msg_id, const uint8_t *param)
             if(magic != CAN_CTL_RESET_MAGIC) {
                 return CAN_ACK_CHECK_FAIL;
             }
-            /* 先回执，稍作延时确保帧发出，再复位 */
-            (void)can_send_control_ack(CAN_CTL_RESET, CAN_ACK_OK);
-            vTaskDelay(pdMS_TO_TICKS(50U));
+            
+            /* 先回执，多次重试确保帧发出，延时足够长，再复位 */
+            ErrStatus ack_status;
+            uint8_t retry = 0U;
+            do {
+                ack_status = can_send_control_ack(CAN_CTL_RESET, CAN_ACK_OK);
+                if(ack_status == SUCCESS) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10U));
+                retry++;
+            } while(retry < 3U);
+            
+            /* 延时确保 CAN 帧物理发出 (波特率 500kbps，8字节帧约 0.16ms，
+             * 加上总线仲裁、填充位、ACK 等，留足 200ms 裕量) */
+            vTaskDelay(pdMS_TO_TICKS(200U));
             NVIC_SystemReset();
         }
         return CAN_ACK_OK; /* 正常不会执行到 */
