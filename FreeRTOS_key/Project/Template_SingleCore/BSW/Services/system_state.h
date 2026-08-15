@@ -57,8 +57,8 @@ extern "C" {
  *       不同状态下建议的温度采样周期，状态越危险，采样越频繁。
  */
 #define SYSTEM_STATE_DEFAULT_LOW_TEMP_TEMP_C           150U /* 低温阈值：低于 15.0°C 进入低温状态。 */
-#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C          350U /* 高温阈值：达到 27.0°C 进入高温预警状态。 */
-#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             400U /* 危险阈值：达到 33.0°C 进入危险状态。 */
+#define SYSTEM_STATE_DEFAULT_HIGH_TEMP_TEMP_C          330U /* 高温阈值：达到 27.0°C 进入高温预警状态。 */
+#define SYSTEM_STATE_DEFAULT_DANGER_TEMP_C             605U /* 危险阈值：达到 33.0°C 进入危险状态。 */
 /*
  * 统一采样周期说明
  *   DS18B20 采用并行转换策略（启动4路 → 等待750ms → 读取数据），
@@ -68,7 +68,7 @@ extern "C" {
  *   不必随危险等级动态调整采样频率。
  */
 #define SYSTEM_STATE_DEFAULT_SAMPLE_MS             1000U /* 统一采样周期 1s */
-#define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      5U    /* 回落确认次数，需连续满足条件才允许降级。 */
+#define SYSTEM_STATE_DEFAULT_FALLBACK_CONFIRM_COUNT      2U    /* 回落确认次数，需连续满足条件才允许降级。 */
 
 /*
  * 运行时可配置参数（通过 CAN 0x20 配置类命令动态修改）
@@ -93,14 +93,11 @@ extern uint16_t g_temp_rise_high_threshold;     /* HIGH_TEMP 升温阈值，单�
 extern uint8_t g_temp_rise_confirm_count;       /* 连续确认次数，默认 2 */
 
 /*
- * 制冷片轮转配置参数
- *   DANGER 状态下多路制冷片需要工作时，为避免电池供电不足，
- *   每次只驱动一路，按固定间隔循环切换。
- *   g_cooler_rotate_interval_ms : 轮转切换间隔（毫秒），默认 5000ms（5秒）。
- *                                 设为 0 表示禁用轮转（恢复全开）。
+ * 制冷片功能开关
+ *   g_cooler_enable : 制冷片功能使能，1=开启，0=关闭（默认开启）
+ *                    当关闭时，所有分区的制冷片都不会开启，无论温度多高。
  */
-#define SYSTEM_STATE_DEFAULT_COOLER_ROTATE_MS    1000U
-extern uint32_t g_cooler_rotate_interval_ms;
+extern uint8_t g_cooler_enable;
 
 /*
  * system_state_t
@@ -182,9 +179,10 @@ typedef struct {
  *   整理到该结构体中，再一次性传入状态机。
  *
  * 字段说明
- *   gas_alarm / pressure_alarm
- *       外部报警输入。通常由专门的检测模块给出，状态机只负责根据它们
- *       决定是否进入更高风险等级；
+ *   gas_alarm
+ *       气体泄漏告警输入。当为 1 时，强制所有分区进入 DANGER 状态；
+ *   pressure_alarm
+ *       压力异常告警输入。作为独立告警，不影响温度状态机，只触发蜂鸣器告警；
  *   pressure_valid
  *       压力数据整体是否有效。若为无效，则状态机不执行压力相关判断；
  *   zone_temperature_tenths[4]
@@ -240,10 +238,13 @@ typedef struct {
  *       读取状态机输出快照；
  *   system_state_get_state()
  *       读取当前状态；
+ *   system_state_force_reevaluate()
+ *       强制状态机立即重新评估所有分区状态（退出手动模式时使用）；
  */
 void system_state_init(void);
 void system_state_reset(void);
 void system_state_clear_predict_history(void);  /* 仅清除历史触发次数，不复位状态机 */
+void system_state_force_reevaluate(void);       /* 强制重新评估状态（退出手动模式时） */
 void system_state_task(const system_state_input_t *input);
 void system_state_get_status(system_state_status_t *status);
 void system_state_get_input(system_state_input_t *input);

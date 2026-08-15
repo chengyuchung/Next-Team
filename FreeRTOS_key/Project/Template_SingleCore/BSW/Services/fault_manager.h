@@ -45,11 +45,11 @@ extern "C" {
  * 运行时可通过 CAN 配置命令（0x18A/0x07、0x18A/0x08）动态修改，配置立即生效。
  */
 #ifndef FAULT_GAS_SENSOR_RAW_MIN
-#define FAULT_GAS_SENSOR_RAW_MIN 2304U
+#define FAULT_GAS_SENSOR_RAW_MIN 2416U
 #endif
 
 #ifndef FAULT_GAS_SENSOR_RAW_MAX
-#define FAULT_GAS_SENSOR_RAW_MAX 2320U
+#define FAULT_GAS_SENSOR_RAW_MAX 2448U
 #endif
 
 /* 运行时可配置的全局变量（由 CAN 配置命令修改） */

@@ -44,7 +44,15 @@ void thermal_control_init(void)
 
 void thermal_control_set_manual_mode(uint8_t enable)
 {
+    uint8_t prev_mode = s_manual_mode;
     s_manual_mode = (enable != 0U) ? 1U : 0U;
+
+    /* 退出手动模式时，强制状态机立即重新评估所有分区状态，
+     * 避免因回落确认计数器未满而导致状态"卡住"在高温/危险状态。
+     * 这样可以确保退出手动模式后，执行器立即响应当前实际温度。 */
+    if((prev_mode != 0U) && (s_manual_mode == 0U)) {
+        system_state_force_reevaluate();
+    }
 }
 
 uint8_t thermal_control_get_manual_mode(void)
